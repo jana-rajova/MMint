@@ -1,0 +1,506 @@
+---
+title: "SpaCET"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/home/rstudio/')
+
+result.dir = '/home/rstudio/mod/results/'
+st.folder = './data/stdata/' 
+
+all.sources = c('S1', 'S2', 'S3', 'S4')
+
+# knitr::opts_knit$set(root.dir = 'E:/ST_multiomics_integration/')
+# remotes::install_github("mojaveazure/seurat-disk")
+# devtools::install_github("data2intelligence/SpaCET")
+library(spacexr)
+library(Matrix)
+library(anndata)
+library(Seurat)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+library(SpaCET)
+
+# reticulate::install_miniconda()
+```
+
+## SpaCET test
+
+Create or load the reference from Biermann et al. 2022 (Dissecting the treatment-naive ecosystem of human melanoma brain metastasis)
+
+```{r}
+# preprocessed file with only snRNAseq from brain metastases
+snrnaseq.file = "./data/scrnaseq/scrnaseq.h5ad"
+data.ann = read_h5ad(snrnaseq.file)
+
+### Load in/preprocess your data, this might vary based on your file type
+if(!file.exists(paste0(result.dir,'SCRef.rds'))){
+  counts = t(data.ann$X) # load in counts matrix
+  meta_data = data.ann$obs # load in meta_data 
+  cell_types = meta_data$cell_type_fine; names(cell_types) = row.names(meta_data) # create cell_types named list
+  cell_types = as.factor(cell_types) # convert to factor data type
+  nUMI = colSums(counts); names(nUMI) = row.names(meta_data)
+  
+  ### Create the reference object
+  reference = Reference(counts, cell_types, nUMI, n_max_cells = 40000)
+  
+  ## Examine reference object (optional)
+  print(dim(reference@counts)) #observe Digital Gene Expression matrix
+  
+  table(reference@cell_types) #number of occurences for each cell type
+  
+  ## Save RDS object (optional)
+  saveRDS(reference, paste0(result.dir,'SCRef.rds'))
+}else{
+  reference = readRDS(paste0(result.dir,'SCRef.rds'))
+}
+```
+Begin the SpaCET analysis. 
+Due to the variability among the malignant cells, they are idfentified via CNA.
+Remainder of the cell types are deconvolved from MBM from the loaded dataset dataset
+
+```{r SpaCET rtest, fig.height=15}
+samples.names = c()
+
+for (folder in list.dirs('/home/rstudio/data/stdata/',
+                         recursive = FALSE,
+                         full.names = FALSE)) {
+  if (grepl('S[1-4]_', folder)) {
+    samples.names = c(samples.names, folder)
+  }
+}
+
+# prepare the reference and remove cell types that are not relevant
+remove = c('Tumor cells', 'T-cell doublets')
+for (ct in remove) {
+  data.ann = data.ann[data.ann$obs$cell_type_fine != ct]
+}
+
+# create main cell type buckets and subtypes
+ct_map_fine = list(
+  "Activated B cells" = "B cells" ,
+  "Astrocytes" = "Astrocytes",
+  "CAFs" = "CAFs",
+  "CD4+ T cells" = "CD4+ T cells",
+  "CD8+ T cells TCF7+" = "CD8+ T cells",
+  "CD8+ T cells TOX+" = "CD8+ T cells",
+  "DC3" = "Dendritic cells",
+  "Endothelial cells" = "Endothelial cells",
+  "MDM" = "MDM",
+  "MDM FTL+" = "MDM",
+  "Microglia"  = "Microglia",
+  "Monocytes"     = "Monocytes",
+  "NK cells"  = "NK cells",
+  "Naïve B cells"  = "B cells",
+  "Neurons"  = "Neurons",
+  "Oligodendrocytes" = "Oligodendrocytes",
+  "Pericytes"    = "Pericytes",
+  "Plasma cells"     = "Plasma cells",
+  "T-cell doublets" = "doublets",
+  "Tfh-like cells" = "CD4+ T cells",
+  "Tregs" =  "Tregs",
+  "Tumor cells" = "Tumor cells",
+  "cDC1" = "Dendritic cells",
+  "cDC2" = "Dendritic cells"
+)
+
+
+ct_map_main = list(
+  "Activated B cells" = "B/Plasma cells" ,
+  "Astrocytes" = "Astrocytes",
+  "CAFs" = "CAFs",
+  "CD4+ T cells" = "T cells",
+  "CD8+ T cells TCF7+" = "T cells",
+  "CD8+ T cells TOX+" = "T cells",
+  "DC3" = "Myeloid cells",
+  "Endothelial cells" = "Endothelial cells",
+  "MDM" = "Myeloid cells",
+  "MDM FTL+" = "Myeloid cells",
+  "Microglia"  = "Microglia",
+  "Monocytes"     = "Myeloid cells",
+  "NK cells"  = "NK cells",
+  "Naïve B cells"  = "B/Plasma cells",
+  "Neurons"  = "Neurons",
+  "Oligodendrocytes" = "Oligodendrocytes",
+  "Pericytes"    = "Pericytes",
+  "Plasma cells"     = "B/Plasma cells",
+  "T-cell doublets" = "doublets",
+  "Tfh-like cells" = "T cells",
+  "Tregs" =  "T cells",
+  "Tumor cells" = "Tumor cells",
+  "cDC1" = "Myeloid cells",
+  "cDC2" = "Myeloid cells"
+)
+
+
+data.ann$obs$ct_custom_fine = as.character(ct_map_fine[match(data.ann$obs$cell_type_fine, names(ct_map_fine))])
+data.ann$obs$ct_custom_main = as.character(ct_map_main[match(data.ann$obs$cell_type_fine, names(ct_map_main))])
+
+# separate the cell types into main and subtypes
+spacet_ref_lineages = list()
+
+for (ct in names(table(data.ann$obs$ct_custom_main))) {
+  spacet_ref_lineages[[ct]] = unique(as.character(data.ann$obs[data.ann$obs$ct_custom_main == ct,]$ct_custom_fine))
+}
+
+# create the reference dataset with cell annotation 
+spacet_ref_counts = as.matrix(t(data.ann$X))
+
+spacet_ref_desc = data.ann$obs
+spacet_ref_desc$cellID = rownames(data.ann$obs)
+spacet_ref_desc = spacet_ref_desc[, c('cellID', 'ct_custom_fine')]
+colnames(spacet_ref_desc) = c('cellID', 'bio_celltype')
+```
+
+Run SpaCET function with the default detection of Tumor cells ('SKCM') and deconvolution of other cell types based on snRNA-seq reference. This is quite computationally intense, check if you have the given number of cores and sufficient memory. You can always adjust the number of cells taken from the reference and get similar results (down to cca 30 cells)
+
+```{r, fig.height=15}
+for (sample.name in samples.names) {
+  print(sample.name)
+  visiumPath = file.path(paste0('/home/rstudio/data/stdata/', sample.name, '/'))
+  print('Loading object')
+  SpaCET_obj = create.SpaCET.object.10X(visiumPath = visiumPath)
+  
+  # calculate the QC metrics
+  SpaCET_obj = SpaCET.quality.control(SpaCET_obj)
+  
+  # plot the QC metrics
+  SpaCET.visualize.spatialFeature(SpaCET_obj,
+                                  spatialType = "QualityControl",
+                                  spatialFeatures = c("UMI", "Gene"))
+  print('Deconvolving with scRNAseq reference')
+  SpaCET_obj = SpaCET.deconvolution.matched.scRNAseq(
+    SpaCET_obj,
+    sc_includeMalignant = FALSE,
+    cancerType = "SKCM",
+    sc_counts = spacet_ref_counts,
+    sc_annotation = spacet_ref_desc,
+    sc_lineageTree = spacet_ref_lineages,
+    sc_nCellEachLineage = 75,
+    coreNo = 13
+  )
+  
+  # calculate the cell-cell colocalization.
+  SpaCET_obj <- SpaCET.CCI.colocalization(SpaCET_obj)
+  
+  # Identify the Tumor-Stroma Interface
+  SpaCET_obj <- SpaCET.identify.interface(SpaCET_obj)
+  print('Saving file')
+  saveRDS(
+    SpaCET_obj,
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/',
+      sample.name,
+      '_spacet.rds'
+    )
+  )
+}
+```
+
+After saving all the results, load this portion of the script plots them
+```{r, fig.height=15}
+processed.samples = list()
+for (file in list.files(paste0('/home/rstudio/mod/results/spacet/'), recursive = FALSE)) {
+  if (grepl('S[1-4]_[A-D][1-2]_', file)) {
+    name = strsplit(file, '_spacet')[[1]][[1]]
+    print(name)
+    file = paste0('/home/rstudio/mod/results/spacet/',
+                  name,
+                  '_spacet.rds')
+    processed.samples[[name]] = readRDS(file)
+  }
+  
+}
+
+for (sample.name in names(processed.samples)[1:length(processed.samples)]) {
+  print(sample.name)
+  SpaCET_obj = processed.samples[[sample.name]]
+  
+  main_ct = c('Malignant',
+              names(SpaCET_obj@results$deconvolution$Ref$lineageTree))
+  sub_ct = setdiff(
+    rownames(SpaCET_obj@results$deconvolution$propMat),
+    names(SpaCET_obj@results$deconvolution$Ref$lineageTree)
+  )
+  
+  SpaCET_obj <- SpaCET.CCI.colocalization(SpaCET_obj)
+  
+  # visualize the cell-cell colocalization.
+  print(SpaCET.visualize.colocalization(SpaCET_obj))
+  
+  # calculate the L-R network score across ST spots.
+  SpaCET_obj <- SpaCET.CCI.LRNetworkScore(SpaCET_obj, coreNo = 13)
+  
+  # visualize the L-R network score.
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "LRNetworkScore",
+      spatialFeatures = c("Network_Score", "Network_Score_pv")
+    )
+  )
+  
+  SpaCET_obj <- SpaCET.GeneSetScore(SpaCET_obj, GeneSets = "Hallmark")
+  
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "GeneSetScore",
+      spatialFeatures = c("HALLMARK_HYPOXIA", "HALLMARK_TGF_BETA_SIGNALING")
+    )
+  )
+  
+  # run gene set calculation
+  SpaCET_obj <-
+    SpaCET.GeneSetScore(SpaCET_obj, GeneSets = "CancerCellState")
+  
+  # show all gene sets
+  rownames(SpaCET_obj@results$GeneSetScore)
+  
+  # visualize two gene sets
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "GeneSetScore",
+      spatialFeatures = c("CancerCellState_Cycle", "CancerCellState_cEMT")
+    )
+  )
+  
+  # run gene set calculation
+  SpaCET_obj <- SpaCET.GeneSetScore(SpaCET_obj, GeneSets = "TLS")
+  
+  # visualize TLS
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "GeneSetScore",
+      spatialFeatures = c("TLS")
+    )
+  )
+  
+  processed.samples[[sample.name]] = SpaCET_obj
+  
+  saveRDS(
+    SpaCET_obj,
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/',
+      sample.name,
+      '_spacet.rds'
+    )
+  )
+  # saveRDS(processed.samples, file = '/home/rstudio/mod/results/spacet/all_samples')
+  gc()
+}
+
+for (sample.name in names(processed.samples)[1:length(processed.samples)]) {
+  # for(sample.name in names(processed.samples)[2: 3]){
+  print(sample.name)
+  SpaCET_obj = processed.samples[[sample.name]]
+  
+  main_ct = c('Malignant',
+              names(SpaCET_obj@results$deconvolution$Ref$lineageTree))
+  sub_ct = setdiff(
+    rownames(SpaCET_obj@results$deconvolution$propMat),
+    names(SpaCET_obj@results$deconvolution$Ref$lineageTree)
+  )
+  
+  # visualize the cell-cell colocalization.
+  pdf(
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/plot/',
+      sample.name,
+      '_coloc_score.pdf'
+    ),
+    width = 7.5 * 2,
+    height = 7.5,
+  )
+  print(SpaCET.visualize.colocalization(SpaCET_obj))
+  dev.off()
+  
+  
+  pdf(
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/plot/',
+      sample.name,
+      '_interface_score.pdf'
+    ),
+    width = 5,
+    height = 5,
+  )
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "Interface",
+      spatialFeature = "Interface",
+      imageBg = FALSE
+    )
+  )
+  dev.off()
+  # visualize the L-R network score.
+  pdf(
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/plot/',
+      sample.name,
+      '_LR score.pdf'
+    ),
+    width = 4 * 2,
+    height = 4,
+  )
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "LRNetworkScore",
+      spatialFeatures = c("Network_Score", "Network_Score_pv"),
+      imageBg = FALSE
+    )
+  )
+  dev.off()
+  
+  n_HallMark = row.names(SpaCET_obj@results$GeneSetScore)
+  n_HallMark = n_HallMark[grepl('HALLMARK', n_HallMark)]
+  pdf(
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/plot/',
+      sample.name,
+      '_Hallmark_scores_SpaCET.pdf'
+    ),
+    width = 4 * 10,
+    height = 4 * 5,
+  )
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "GeneSetScore",
+      spatialFeatures = n_HallMark,
+      nrow = 5,
+      imageBg = FALSE
+    )
+  )
+  dev.off()
+  
+  n_ccs = rownames(SpaCET_obj@results$GeneSetScore)
+  n_ccs = n_ccs[grepl('CancerCell', n_ccs)]
+  
+  # visualize two gene sets
+  pdf(
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/plot/',
+      sample.name,
+      'CancerCellStates.pdf'
+    ),
+    width = 4 * 4,
+    height = 4 * 4,
+  )
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "GeneSetScore",
+      spatialFeatures = n_ccs,
+      nrow = 4,
+      imageBg = FALSE
+    )
+  )
+  dev.off()
+  
+  
+  pdf(
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/plot/',
+      sample.name,
+      'TLS.pdf'
+    ),
+    width = 5 ,
+    height = 5,
+  )
+  # visualize TLS
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "GeneSetScore",
+      spatialFeatures = c("TLS"),
+      imageBg = FALSE
+    )
+  )
+  dev.off()
+  
+}
+for (sample.name in names(processed.samples)[1:length(processed.samples)]) {
+  # for(sample.name in names(processed.samples)[2: 3]){
+  print(sample.name)
+  SpaCET_obj = processed.samples[[sample.name]]
+  
+  main_ct = c('Malignant',
+              names(SpaCET_obj@results$deconvolution$Ref$lineageTree))
+  sub_ct = setdiff(
+    rownames(SpaCET_obj@results$deconvolution$propMat),
+    names(SpaCET_obj@results$deconvolution$Ref$lineageTree)
+  )
+  
+  pdf(
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/plot/',
+      sample.name,
+      '_spacet_main.pdf'
+    ),
+    width = 3 * 2,
+    height = 3 * ceiling(length(main_ct) / 2),
+  )
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "CellFraction",
+      spatialFeatures = main_ct,
+      pointSize = 0.55,
+      nrow = ceiling(length(main_ct) / 2),
+      imageBg = FALSE,
+      sameScaleForFraction = TRUE
+    )
+  )
+  dev.off()
+  
+  pdf(
+    file = paste0(
+      '/home/rstudio/mod/results/spacet/plot/',
+      sample.name,
+      '_spacet_subtypes.pdf'
+    ),
+    width = 3 * 2,
+    height = 3 * ceiling(length(sub_ct) / 2),
+  )
+  print(
+    SpaCET.visualize.spatialFeature(
+      SpaCET_obj,
+      spatialType = "CellFraction",
+      spatialFeatures = sub_ct,
+      pointSize = 0.55,
+      nrow = ceiling(length(sub_ct) / 2),
+      imageBg = FALSE,
+      sameScaleForFraction = TRUE
+    )
+  )
+  dev.off()
+}  
+```
+Keepv the deconvolution of the samples available as csvs.
+```{r export csv}
+for(sample.name in names(processed.samples)[1:length(processed.samples)]) {
+  # for(sample.name in names(processed.samples)[2: 3]){
+  print(sample.name)
+  SpaCET_obj = processed.samples[[sample.name]]
+  df = SpaCET_obj@results$deconvolution$propMat
+  write.csv(
+    df,
+    file = paste0(
+      'mod/results/spacet/csvs/',
+      sample.name,
+      '_SpaCET_deconvolution.csv'
+    ),
+    quote = FALSE
+  )
+}
+
+```

@@ -1,0 +1,156 @@
+```{r setup}
+library(ggplot2)
+```
+```{r}
+se = readRDS('../data/transcriptome_analysis/STACAS_integrated.rds')
+se = add.spacet(se)
+se
+```
+
+```{r}
+stacked_bar_plot = function(
+    obs_ann,
+    var_ann,
+    var_name,
+    reduction_df,
+    output_folder,
+    custom_pal=c()
+    
+){
+  reduction_df = reduction_df[, var_ann]
+  reduction_df$ann = obs_ann
+  reduction_df = reduction_df %>%
+    group_by(ann) %>%
+    summarise_if(is.numeric, funs(sum))
+  reduction_df_pivot = reduction_df %>%
+    pivot_longer(!ann, names_to = 'values', values_to = 'contribution')
+  
+  if (length(custom_pal)==0){
+      p = ggplot(reduction_df_pivot, aes(fill=`values`, y=`contribution`, x=ann)) + 
+       geom_col(position="fill") + 
+       theme(axis.text.x = element_text(angle = 45, margin = margin(t=30, "pt")))
+  } else {
+      p = ggplot(reduction_df_pivot, aes(fill=`values`, y=`contribution`, x=ann)) + 
+       geom_col(position="fill") + 
+       theme(axis.text.x = element_text(angle = 45, margin = margin(t=30, "pt"))) + 
+       scale_fill_manual(values = custom_pal)
+  }
+
+  
+  pdf(
+    file=paste0(output_folder, var_name, '_proportions.pdf'),  
+    width = 6, 
+    height = 5, 
+    ) 
+  print(p)
+  dev.off()
+  
+  print(p)
+}
+```
+
+```{r}
+## implement this color palette
+
+main.ct = c(
+  "Malignant",
+  "B/Plasma cells",
+  "Myeloid cells",
+  "T cells",
+  "NK cells",
+  "CAFs",
+  "Oligodendrocytes",
+  "Astrocytes",
+  "Pericytes",
+  "Neurons",
+  "Endothelial cells"
+)
+
+cell_type_colors <- c(
+  "gold1",
+  "#FF7F00", # "Astrocytes"
+  "#A6CEE3", # "B/Plasma cells"
+  "#6A3D9A", # "CAFs"
+  "#FB9A99", # "Endothelial cells"
+  "#1F78B4", # "Myeloid cells"
+  "#B2DF8A", # "NK cells"
+  "#E31A1C", # Neurons"
+  "#CAB2D6", # "Oligodendrocytes"
+  "#FDBF6F", # "Pericytes"
+  "#33A02C" #  "T cells"
+  
+)
+
+se$sample_id = gsub('P', 'S', se$sample_id)
+se$sample_id = gsub('_A1', '_R1', se$sample_id)
+se$sample_id = gsub('_B1', '_R2', se$sample_id)
+se$sample_id = gsub('_C1', '_R3', se$sample_id)
+se$sample_id = gsub('_D1', '_R4', se$sample_id)
+```
+The functino bellow can be modified for any data that is in the dataset
+```{r}
+reduction_df = as.data.frame(t(se.STACAS@reductions$SpaCET))
+
+main.ct = c("Malignant", "B/Plasma cells", "Myeloid cells", "T cells", "NK cells", "CAFs", "Oligodendrocytes", 
+"Astrocytes", "Pericytes", "Neurons", "Endothelial cells")
+sub_ct = c('Malignant', setdiff(colnames(reduction_df), main.ct))
+
+stacked_bar_plot(
+    obs_ann=se.STACAS$STACAS.clusters,
+    var_ann=main.ct,
+    var_name='main_ct_prop_cluster_STACAS',
+    reduction_df=reduction_df,
+    output_folder='/home/rstudio/mod/results/spacet/plot/'
+)
+    
+stacked_bar_plot(
+    obs_ann=se.STACAS$source,
+    var_ann=main.ct,
+    var_name='main_ct_prop_source_STACAS',
+    reduction_df=reduction_df,
+    output_folder='/home/rstudio/mod/results/spacet/plot/',
+    custom_pal = cell_type_colors
+    
+)
+
+
+reduction_df = as.data.frame(se.STACAS$interface)
+colnames(reduction_df) = c('source')
+for (source in unique(se.STACAS$interface)){
+  reduction_df[[source]] = as.numeric(reduction_df$source == source)
+}
+
+
+stacked_bar_plot(
+    obs_ann=se.STACAS$STACAS.clusters,
+    var_ann=unique(se.STACAS$interface),
+    var_name='interface_prop_cluster',
+    reduction_df=reduction_df,
+    output_folder='/home/rstudio/mod/results/spacet/plot/',
+    # custom_pal = brew.pal.source
+    
+)
+
+
+```
+Plot cell distributions for non-malignant cells in the samples
+```{r non-malignant cell proportions}
+reduction_df = as.data.frame(t(se@reductions$SpaCET))
+reduction_df = reduction_df[, main.ct[2:length(main.ct)]]
+reduction_df$Sample = paste0(se$sample_id)
+
+reduction_df_agg = reduction_df %>% group_by(Sample) %>% summarise_if(is.numeric, funs(sum)) %>%
+    pivot_longer(!Sample, names_to = 'Cell Types', values_to = 'Contribution')
+p = ggplot(reduction_df_agg, aes(fill=`Cell Types`, y=`Contribution`, x=Sample)) + 
+       geom_col(position="fill") + 
+       theme(axis.text.x = element_text(angle = 45, margin = margin(t=10, "pt"))) + 
+       scale_fill_manual(values = cell_type_colors)
+p
+
+pdf(file = paste0('/home/rstudio/mod/results/spacet/plot/non_malignangt_sample_cellular_composition.pdf'),
+    height = 7.5,
+    width = 7.5)
+print(p)
+dev.off()
+```
+

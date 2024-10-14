@@ -1,0 +1,611 @@
+---
+title: "STUtility analysis of melanoma metastases"
+author: "Jana"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, quiet=TRUE)
+knitr::opts_knit$set(root.dir = '/home/rstudio/')
+source('/home/rstudio/mod/bin/utils.R', 
+       local = TRUE
+       )
+```
+
+```{r, include=FALSE}
+library(reticulate)
+library(remotes)
+# reticulate::install_miniconda(update = TRUE, force = TRUE)
+# reticulate::conda_install('r-reticulate', 'leidenalg')
+# remotes::install_github('saezlab/OmnipathR')
+# remotes::install_github('saezlab/decoupleR')
+# 
+# # install.packages('dbscan', quiet = TRUE)
+# # install.packages('cluster')
+# remotes::install_github("carmonalab/STACAS", quiet = TRUE, )
+# devtools::install_github("data2intelligence/SpaCET", quiet = TRUE)
+# devtools::install_github('immunogenomics/presto', quiet = TRUE)
+
+library(RColorBrewer)
+library(Matrix)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(spdep)
+library(kableExtra)
+library(magrittr)
+library(dplyr)
+library(ape)
+library(harmony)
+library(decoupleR)
+library(tibble)
+library(tidyr)
+library(factoextra)
+library(viridis)
+library(patchwork)
+library(gridExtra)
+library(pheatmap)
+library(Seurat)
+options(Seurat.object.assay.version = "v5")
+library(STACAS)
+library(SpaCET)
+library(fossil)
+
+save.file = TRUE
+
+# unifying all continous values into the 'inferno'
+v.col = viridis_pal(option = "A")(6) # select among a viridis palette
+original.col = c("lightgray", "mistyrose", "red", "dark red", "black")
+curr.pal = v.col
+
+cluster.pal = 'Paired' # cluster palette
+
+# select from "NMF" or "harmony"
+res = 0.6
+sel.red = 'STACAS'
+remove.mt.rb = TRUE
+appendix = '_mt_ribo_kept'
+if(remove.mt.rb == TRUE){appendix = ''}
+
+sources = c('S1', 'S2', 'S3', 'S4')
+curr.dir = '/home/rstudio/'
+output.folder = paste0(curr.dir, 'mod/results/transcriptome_analysis/', paste(sources, collapse = "-"), '/')
+interim.data.folder = paste0(curr.dir, 'mod/data/transcriptome_analysis/')
+alignment.folder = paste0(curr.dir, 'data/stutility_alignment/')
+st.folder = '/home/rstudio/data/stdata/'
+```
+
+```{r slide batches}
+samples = c('S1_C1', 'S1_D1', 'S2_A1', 'S2_B1', 'S2_C1','S3_A1' ,'S3_B1' ,'S3_D1' ,'S4_A1' ,'S4_B1' ,'S4_C1','S4_D1')
+# samples = c('S1_C1', 'S1_D1')
+
+slide.section = data.frame('slides'= c(117, 117, 121, 121, 121, 117, 117, 121, 110, 110, 110, 110),
+  row.names = c(
+                'S1_C1', 'S1_D1', 
+                'S2_A1', 'S2_B1', 'S2_C1',
+                'S3_A1', 'S3_B1', 'S3_D1',
+                'S4_A1', 'S4_B1', 'S4_C1', 'S4_D1'
+                ))
+```
+
+
+```{r set a source/sample palette}
+if(length(unique(sources)) == 1){
+  brew.pal.sample = brewer.pal(n = ns, name = 'Set1')
+} else {
+  palettes=list()
+  palettes[['S1']] = c('darkorchid3', 'darkorchid4')
+  palettes[['S2']] = c('yellow4', 'yellow3', 'yellow2')
+  palettes[['S3']] = c('pink3', 'pink2', 'pink1')
+  palettes[['S4']] = c('dodgerblue4', 'dodgerblue3', 'dodgerblue2', 'dodgerblue1')
+
+  brew.pal.sample = c()
+  brew.pal.source = c()
+  
+  for(s in 1:length(unique(sources))){
+    s.name = sources[s]
+    brew.pal.sample = c(brew.pal.sample, palettes[[s.name]])
+    brew.pal.source = c(brew.pal.source, palettes[[s.name]][1])
+  }
+get.brewer.pal = colorRampPalette(brewer.pal(9, cluster.pal))
+}
+```
+First we load the Visium objects
+
+```{r create result folders}
+dir.create(interim.data.folder, recursive = TRUE, showWarnings = FALSE)
+dir.create(paste0(output.folder, 'plots'), recursive = TRUE, showWarnings = FALSE)
+```
+
+Load the samples from the raw files or from the saved processed file
+
+```{r}
+lists = load.samples()
+lists[[1]] = add.spacet(lists[[1]]) # make sure you have run the SpaCET script
+```
+Plots for ribosomal counts and other QC stuff
+```{r plot}
+for (i in 1:length(samples)){
+# for (i in 1:5){
+
+  print(samples[i])
+  lists[[2]][[i]] = SetIdent(lists[[2]][[i]], value = 'sample_id')
+  plot1 = VlnPlot(lists[[2]][[i]], features = c("nCount_Spatial"), pt.size = 0.1) + NoLegend()
+  plot2 = SpatialFeaturePlot(lists[[2]][[i]], features = c("nCount_Spatial"), combine = TRUE) + theme(legend.position = "right")
+  
+  plot3 = VlnPlot(lists[[2]][[i]], features = c('percent.mito'), pt.size = 0.1) + NoLegend()
+  plot4 = SpatialFeaturePlot(lists[[2]][[i]], features = c('percent.mito'), combine = TRUE) + theme(legend.position = "right")
+  
+  plot5 = VlnPlot(lists[[2]][[i]], features = c('percent.ribo'), pt.size = 0.1) + NoLegend()
+  plot6 = SpatialFeaturePlot(lists[[2]][[i]], features = c('percent.ribo'), combine = TRUE) + theme(legend.position = "right")
+  wrap_plots(plot1, plot2, plot3, plot4, plot5, plot6, ncol = 2, byrow = TRUE, widths = c(1,5))
+  
+  pdf(file = paste0(output.folder, 'plots/', samples[i], '_nCounts_mito_ribo.pdf'),
+    height = 15,
+    width = 7.5)
+  print(wrap_plots(plot1, plot2, plot3, plot4, plot5, plot6, ncol = 2, byrow = TRUE, widths = c(1,2)))
+  dev.off()
+}
+  
+```
+
+
+
+```{r QC}
+plot_qc(
+  seurat.obj = lists[[1]],
+  output.folder = output.folder
+  )
+```
+
+# se$sample_id <- factor(se$sample_id, levels=c('V19N18-117_C1_S1', 'V19N18-117_D1_S1',
+#                                               'V19N18-121_A1_S2', 'V19N18-121_B1_S2', 'V19N18-121_C1_S2',
+#                                               'V19N18-117_A1_S3', 'V19N18-117_B1_S3', 'V19N18-121_D1_S3',
+#                                               'V19N18-110_A1_S4', 'V19N18-110_B1_S4', 'V19N18-110_C1_S4', 'V19N18-110_D1_S4'))
+
+
+
+### Manually selected settings for sources
+S1 = matrix(c(2, 0, -27, -25, FALSE, FALSE), ncol = 6)
+S2 = matrix(c(2, 3, 25.9, -42.5, -4, 60, -12, -50, 0, 1, 1, 1), ncol = 6)
+S3 = matrix(c(2, 3, 0, 8.3, 20, 20, -57, -57, 1, 1, 1, 1), ncol = 6)
+S4 = matrix(c(2, 3, 4, 30.1, -91.5, 8.2, -14, 6, -4, 30, 30, 111, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE), ncol = 6)
+
+
+Assign cell cycle score
+```{r}
+# assign the cell cycle though a standard Seurat gene pannel
+se = lists[[1]]
+main.ct = c("Malignant", "B/Plasma cells", "CNS cells", "Endothelial cells", "Myeloid cells", "Stromal cells", "T/NK cells" )
+
+se = CellCycleScoring(se, s.features = cc.genes$s.genes, g2m.features = cc.genes$g2m.genes, set.ident = TRUE)
+se$CC.Difference = se$S.Score - se$G2M.Score
+```
+
+PCA and UMAP without any correction
+```{r PCA to clustering, fig.height=25}
+res = 0.6
+var.exp = 0.05 # cutoff for explained vatiation
+
+se = RunPCA(se, assay = 'SCT', verbose = FALSE, npcs=100, reduction.name = 'pca.nc')
+pca.max = max(which((se@reductions$pca@stdev[1:99] - se@reductions$pca@stdev[2:100]) > var.exp))
+ElbowPlot(se, ndims = 100)
+
+# how much variance does the PCA explain?
+mat = as.matrix(GetAssayData(se, assay = "SCT", slot = "scale.data"))
+pca = se[["pca"]]
+
+# Get the total variance and PCA explained variance:
+total_variance = sum(matrixStats::rowVars(mat))
+varExplained = as.data.frame(pca@stdev)
+eigValues = (pca@stdev)^2  ## EigenValues
+varExplained$total_exp = eigValues / total_variance
+
+
+se = FindNeighbors(se,
+                   reduction = "pca.nc",
+                   dims = 1:pca.max,
+                   k.param = 60,
+                   prune.SNN = 1/15, 
+                   graph.name = 'snn.nc')
+
+se = FindClusters(se, resolution=res, graph.name = 'snn.nc', cluster.name = 'clusters.nc')
+
+se = RunUMAP(se, dims = 1:pca.max, reduction.name = 'umap.nc')
+DimPlot(se, group.by = c('sample_id', 'source'), pt.size = 0.1, cols = brew.pal.sample)
+FeaturePlot(se, features = c('nCount_RNA', 'percent.mito', 'percent.ribo', 'CC.Difference'), pt.size = 0.1, ncol = 2)
+
+p1 = DimPlot(se, group.by = 'sample_id', pt.size = 0.1, cols = brew.pal.sample, reduction = 'umap.nc')
+p2 = DimPlot(se, group.by = 'sample_id', pt.size = 0.1, cols = brew.pal.sample, reduction = 'pca.nc')
+p3 = DimPlot(se, group.by = 'slide', pt.size = 0.1, reduction = 'umap.nc')
+p4 = DimPlot(se, group.by = 'source', pt.size = 0.1, cols = brew.pal.source, reduction = 'umap.nc')
+p6 = DimPlot(se, group.by = 'Phase', pt.size = 0.1, reduction = 'umap.nc')
+p5 = DimPlot(se, group.by = 'seurat_clusters', pt.size = 0.1, reduction = 'umap.nc')
+
+p9 = SpatialDimPlot(se, 
+                   group.by = "seurat_clusters", 
+                   ncol=6)
+
+(p1-p5)
+(p2-p4)/(p5-p6)
+p9
+
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_non_batch_corrected_regressed_CLUSTERS.pdf'), height = length(length(samples)) * 30, width = 15)
+p9
+dev.off()
+
+png(filename = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_non_batch_corrected_regressed_UMAP.png'), unit = 'px', height = 1500, width = 1000)
+(p1-p5)/(p3-p4)/(p2-p6)
+dev.off()
+
+pdf(file  = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_non_batch_corrected_regressed_UMAP.pdf'), height = 20, width = 10)
+(p1-p2)/(p3-p4)/(p1-p5)/(p3-p4)/(p2-p6)
+dev.off()
+
+for (ct in main.ct){
+  print(ct)
+  se[[ct]] = as.numeric(se@reductions$SpaCET[ct, ])
+  p1 = SpatialFeaturePlot(se, 
+                          features = ct,
+                          image.alpha = 0,
+                          ncol = 3)
+  p2 = FeaturePlot(se, 
+                   features = ct, 
+                   pt.size = 1, 
+                   reduction = 'umap.nc')
+  print(p1 - p2)
+}
+
+saveRDS(se, file = paste0(output.folder, 'data/', paste0(sources, collapse ='-'), '_merged_non_batch_corr.rds'))
+# readRDS(file = paste0(output.folder, 'data/', paste0(sources, collapse ='-'), '_merged_non_batch_corr.rds'))
+```
+
+Running STACAS integration  
+```{r STACAS correction, fig.height=15}
+file = paste0('/home/rstudio/mod/data/transcriptome_analysis/STACAS_integrated.rds')
+recompute = FALSE
+if (file.exists(file) | recompute != FALSE){
+  se.STACAS = readRDS(file)
+} else {
+  se.STACAS = Run.STACAS(
+    lists[[2]], 
+    anchor.features=1500, 
+    k.anchor=30,
+    dims=50,
+    verbose = TRUE
+    )
+  gc()
+  
+  se.STACAS = RunUMAP(
+    se.STACAS, 
+    dims = 1:50,
+    reduction.name = 'umap.STACAS'
+    
+    )
+  
+  se.STACAS = FindNeighbors(se.STACAS,
+                     reduction = "pca",do.plot = TRUE,
+                     dims = 1:50,
+                     k.param = 60,
+                     prune.SNN = 1/15)
+  se.STACAS = FindClusters(se.STACAS, 
+                           resolution=1.5, 
+                           cluster.name = 'STACAS.clusters', 
+                           graph.name = 'integrated_snn', 
+                           algorithm = 1
+                           )
+  
+  se.STACAS = add.spacet(se.STACAS)
+  se.STACAS$sample_tissue = paste0(se.STACAS$sample_id, '-', se.STACAS$interface)
+  saveRDS(se.STACAS, file)
+}
+
+se.STACAS$source = gsub('S', 'P', se.STACAS$source)
+se.STACAS$Phase = se$Phase
+
+se = add.spacet(se)
+
+se$source = gsub('S', 'P', se$source)
+
+p0 = DimPlot(se.STACAS, 
+             group.by = c('Phase'), 
+             pt.size = 0.5, 
+             reduction = 'umap.STACAS'
+             )
+p1 = DimPlot(se.STACAS, 
+             group.by = c('sample_id'), 
+             pt.size = 0.5, 
+             cols = brew.pal.sample, 
+             reduction = 'umap.STACAS'
+             )
+p2 = DimPlot(se.STACAS, 
+             group.by = c('source'), 
+             pt.size = 0.5, 
+             alpha = 0.75, 
+             reduction = 'umap.STACAS',
+             cols = brew.pal.source
+             )
+p3 = DimPlot(se.STACAS, 
+             group.by = c('STACAS.clusters'), 
+             pt.size = 0.5, 
+             alpha = 0.75, 
+             reduction = 'umap.STACAS'
+             )
+p4 = DimPlot(se.STACAS, 
+             group.by = c('interface'), 
+             pt.size = 0.5, 
+             alpha = 0.75,
+             cols = c('black', 'darkgrey', 'gold1'), 
+             reduction = 'umap.STACAS'
+             )
+
+
+p5 = DimPlot(se,
+             group.by = c('source'),
+             pt.size = 0.5,
+             alpha = 0.75,
+             cols = brew.pal.source
+             )
+p6 = DimPlot(se,
+             group.by = c('interface'),
+             pt.size = 0.5,
+             alpha = 0.75,
+             cols = c('black', 'darkgrey', 'gold1'))
+
+p9 = SpatialDimPlot(se.STACAS, 
+                   group.by = "STACAS.clusters", 
+                   combine = TRUE, 
+                   image.alpha = 0,
+                   label = TRUE,
+                   ncol=4)
+
+p1-p3
+p2-p4
+p5-p6
+
+p9
+
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_STACAS_phase_sample.pdf'), height = 7, width = 14)
+p0-p1
+dev.off()
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_STACAS_spatial_clusters.pdf'), height = 24, width = 30)
+p9
+dev.off()
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_STACAS_vs_non_corr_UMAP.pdf'), height = 15, width = 15)
+(p2-p4)/(p5-p6)
+dev.off()`
+
+se.STACAS = BuildClusterTree(se.STACAS, assay = 'SCT', reduction = 'pca')
+PlotClusterTree(se.STACAS)
+
+
+de.markers = FindAllMarkers(se.STACAS, only.pos = TRUE, assay = 'SCT')
+top10 = de.markers %>%
+  dplyr::filter(p_val_adj < 0.001) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(wt = -p_val_adj, n = 10) %>%
+  dplyr::top_n(wt = avg_log2FC, n = 10)
+
+n.clusters = length(unique(se.STACAS[['STACAS.clusters']]))
+de.heatmap = DoHeatmap(
+  se.STACAS,
+  features = top10$gene,
+  group.colors = brewer.pal(n = n.clusters,
+                            name = cluster.pal)
+)
+
+de.heatmap
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_STACAS_clusters_DE_heatmap.pdf'), height = 7, width = 7)
+de.heatmapse
+dev.off()
+```
+
+```{r build tree, fig.width=7, fig.height=7}
+se.all = readRDS('mod/data/transcriptome_analysis/S1-S2-S3-S4_pre_processed_slides_merged.rds')
+se.all = add.spacet(se.all)
+se.cancell = se.all[, se.all@reductions$SpaCET['Malignant',] > 0.90]
+se.cancell.list = SplitObject(se.cancell, split.by = 'source')
+se.cancell.corr = Run.STACAS(se.cancell.list, k.anchor = 10, dims = 50)
+
+se.cancell.corr = RunUMAP(se.cancell.corr,
+                          dims = 1:50,
+                          reduction.name = 'umap.STACAS')
+
+se.cancell.corr = FindNeighbors(
+  se.cancell.corr,
+  reduction = "pca",
+  do.plot = TRUE,
+  dims = 1:50,
+  k.param = 60,
+  prune.SNN = 1 / 15
+)
+se.cancell.corr = FindClusters(
+  se.cancell.corr,
+  resolution = 1.0,
+  cluster.name = 'STACAS.clusters',
+  algorithm = 4
+)
+
+p1 = DimPlot(
+  se.cancell.corr,
+  group.by = c('sample_id'),
+  pt.size = 0.5,
+  cols = brew.pal.sample,
+  reduction = 'umap.STACAS'
+)
+p2 = DimPlot(
+  se.cancell.corr,
+  group.by = c('source'),
+  pt.size = 0.5,
+  alpha = 0.75,
+  reduction = 'umap.STACAS',
+  cols = brew.pal.source
+)
+p3 = DimPlot(
+  se.cancell.corr,
+  group.by = c('STACAS.clusters'),
+  pt.size = 0.5,
+  alpha = 0.75,
+  reduction = 'umap.STACAS'
+)
+p4 = DimPlot(
+  se.cancell.corr,
+  group.by = c('interface'),
+  pt.size = 0.5,
+  alpha = 0.75,
+  cols = c('black', 'darkgrey', 'gold1'),
+  reduction = 'umap.STACAS'
+)
+
+p3 - p2
+
+se.cancell.corr = BuildClusterTree(se.cancell.corr)
+PlotClusterTree(se.cancell.corr)
+
+file = paste0('/home/rstudio/mod/data/transcriptome_analysis/STACAS_cancer_only_integrated.rds')
+se.cancell.corr$sample_tissue = paste0(se.cancell.corr$sample_id, '-', se.cancell.corr$interface)
+saveRDS(se.cancell.corr, file)
+
+de.markers = FindAllMarkers(se.cancell.corr, only.pos = TRUE, assay = 'SCT')
+top10 = de.markers %>%
+  dplyr::filter(p_val_adj < 0.001) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(wt = -p_val_adj, n = 10) %>%
+  dplyr::top_n(wt = avg_log2FC, n = 10)
+
+n.clusters = length(unique(se.cancell.corr[['source']][,]))
+de.heatmap = DoHeatmap(
+  se.cancell.corr,
+  features = top10$gene,
+  group.colors = brewer.pal(n = n.clusters,
+                            name = cluster.pal)
+)
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_STACAS_cancer_only_UMAP.pdf'), height = 7, width = 15)
+p3 - p2
+dev.off()
+
+p3 - p2
+de.heatmap
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_STACAS_cancer_only_DE_heatmap.pdf'), height = 7, width = 7)
+de.heatmap
+dev.off()
+
+se.STACAS.agg = AggregateExpression(se.STACAS,
+                                    group.by = 'seurat_clusters',
+                                    return.seurat = TRUE)
+se.STACAS = BuildClusterTree(se.STACAS,
+                             assay = 'SCT',
+                             reduction = 'pca')
+PlotClusterTree(se.STACAS)
+plot
+```
+
+```{r plot the STACAS integrated set, fig.height=15}
+main.ct = c("Malignant", "B/Plasma cells", "CNS cells", "Endothelial cells", "Myeloid cells", "Stromal cells", "T/NK cells" )
+for (ct in main.ct){
+# for (ct in rownames(se.STACAS@reductions$SpaCET)){
+  print(ct)
+  se.STACAS[[ct]] = as.numeric(se.STACAS@reductions$SpaCET[ct, ])
+  p1 = SpatialFeaturePlot(se.STACAS, 
+                          features = ct,
+                          image.alpha = 0,
+                          ncol = 3)
+  p2 = FeaturePlot(se.STACAS, 
+                   features = ct, 
+                   pt.size = 2)
+  print(p1 - p2)
+}
+
+```
+
+Use NMF form the NNLM package to extract the non-negative factors from the dataset¨
+In manusscript, decoupleR was used for pathway activity assignments 
+```{r NMF test, fig.height=30}
+# devtools::install_github('linxihui/NNLM', force = TRUE)
+library(NNLM)
+se = readRDS('/home/rstudio/mod/data/transcriptome_analysis/S1-S2-S3-S4_pre_processed_slides_merged.rds')
+se = add.spacet(se)
+
+# se.source = se[, se$source == 'S1'] # subset dataset
+A = as.matrix(se@assays$SCT$data)
+hvg = se@assays$SCT@var.features
+
+A = A[hvg, ]
+k = 20
+decomp = nnmf(A, k, rel.tol = 1e-15, method = 'scd', n.threads = 15, max.iter = 3000)
+
+hmat = decomp$H
+features_h = c()
+for (h in 1:k){se.STACAS[[paste0('h', h)]] = hmat[h, ]; features_h = c(features_h, paste0('h', h))}
+
+
+n_genes = 200
+top_genes = as.data.frame(decomp$W)
+top_genes$name = rownames(top_genes)
+top_genes = pivot_longer(top_genes, cols = !name, names_to = 'factor', values_to = 'weight')
+top_genes = top_genes[order(top_genes$weight, decreasing = TRUE) , ]
+n_top_genes = top_genes$name[1:n_genes]
+
+ht_df = as.data.frame(decomp$W)[n_top_genes, ]
+ht_df$max_col = colnames(ht_df)[max.col(ht_df, ties.method='first')]
+ht_df = ht_df[order(ht_df$max_col), 1:20]
+
+DoHeatmap(se, features = rownames(ht_df))
+```
+```{r}
+p1 = SpatialFeaturePlot(
+  se.STACAS, 
+  features = features_h, 
+  images = unique(se$sample_id), 
+  ncol = 12)
+p2 = FeaturePlot(
+  se.STACAS, 
+  features = features_h, 
+  ncol = 4, 
+  pt.size = 0.25, 
+  alpha = 0.25)
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_NMF_spatial.pdf'), height = k*10, width = 130)
+p1
+dev.off()
+
+# SpatialFeaturePlot(se.STACAS, features = features_h, images = unique(se$sample_id), ncol = 12)
+
+pdf(file = paste0(output.folder, 'plots/', paste0(sources, collapse = '-'), '_NMF_spatial_STACAS_umap.pdf'), height = 13, width = 13)
+p2
+dev.off()
+
+p1
+p2
+# FeaturePlot(se.STACAS, features = features_h, ncol = 4, pt.size = 2.5, alpha = 0.25)
+
+se[['nmf']] = CreateDimReducObject(embeddings = t(decomp$H),key = "NMF_", assay = DefaultAssay(se))
+colnames(decomp$W) = colnames(se[['nmf']])
+se[['nmf']]@feature.loadings = decomp$W
+
+se = RunUMAP(
+  se, 
+  dims = 1:20,
+  reduction = 'nmf',
+  reduction.name = 'umap.NMF'
+  )
+
+se = FindNeighbors(se,
+                   reduction = "nmf",
+                   dims = 1:20,
+                   k.param = 60,
+                   prune.SNN = 1/15)
+se = FindClusters(se, 
+                 resolution=0.5, 
+                 cluster.name = 'NMF.clusters'
+                 )
+
+```

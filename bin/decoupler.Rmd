@@ -1,0 +1,911 @@
+---
+title: "DecoupleR"
+output: html_document
+date: "2023-08-07"
+---
+
+For this script is used the full transcriptome data, not the SCT normalized data
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, quiet=TRUE)
+knitr::opts_knit$set(root.dir = '/home/rstudio/')
+```
+
+```{r, include=FALSE}
+setwd('../rstudio/mod/')
+devtools::install_github("nicolash2/ggdendroplot")
+install.packages('reshape2')
+install.packages('ggplotify')
+library(ggplotify)
+library(reticulate)
+library(remotes)
+
+# reticulate::install_miniconda(update = TRUE, force = TRUE)
+# reticulate::conda_install('r-reticulate', 'leidenalg')
+# BiocManager::install('GSVA')
+# BiocManager::install("decoupleR", ask = FALSE, force = TRUE)
+# remotes::install_github('https://github.com/saezlab/OmnipathR.git')
+# install.packages('msigdbr')
+# remotes::install_github('https://github.com/saezlab/decoupleR.git')
+library(RColorBrewer)
+library(Matrix)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(spdep)
+library(kableExtra)
+library(magrittr)
+library(dplyr)
+library(harmony)
+library(decoupleR)
+library(tibble)
+library(tidyr)
+library(factoextra)
+library(viridis)
+library(gridExtra)
+library(stringr)
+library(pheatmap)
+library(msigdbr)
+library(Seurat)
+library(stats)
+options(Seurat.object.assay.version = "v5")
+
+source('/home/rstudio/mod/bin/utils.R', 
+       local = TRUE
+       )
+```
+
+```{r slide batches}
+cluster.pal = 'Paired' # cluster palette
+sources = c('S1', 'S2', 'S3', 'S4')
+slide.section = data.frame('slides'= c(117, 117, 121, 121, 121, 117, 117, 121, 110, 110, 110, 110),
+  row.names = c('S1_C1', 'S1_D1', 'S2_A1', 'S2_B1', 'S2_C1','S3_A1' ,'S3_B1' ,'S3_D1' ,'S4_A1' ,'S4_B1' ,'S4_C1','S4_D1'))
+```
+
+```{r set a source/sample palette}
+if(length(unique(sources)) == 1){
+  brew.pal.sample = brewer.pal(n = ns, name = 'Set1')
+} else {
+  palettes=list()
+  palettes[['S1']] = c('#e06666', '#ecb8b8')
+  palettes[['S2']] = c('#28f618', '#25d283', '#23bfbb')
+  palettes[['S3']] = c('#e2f4c7', '#eae374', '#f9d62e')
+  palettes[['S4']] = c('#8d8bf1', '#5843a2', '#41296a', '#8638b7')
+
+  brew.pal.sample = c()
+  
+  for(s in 1:length(unique(sources))){
+    s.name = sources[s]
+    brew.pal.sample = c(brew.pal.sample, palettes[[s.name]])
+  }
+get.brewer.pal = colorRampPalette(brewer.pal(16, cluster.pal))
+}
+```
+
+```{r load seurat object, fig.height=20}
+file.name = paste0('./mod/data/transcriptome_analysis/', paste0(sources, collapse ='-'), '_pre_processed_slides_merged.rds')
+file.name.STACAS = paste0('/home/rstudio/mod/data/transcriptome_analysis/STACAS_integrated.rds')
+se.STACAS = readRDS(file.name.STACAS)
+
+se = readRDS(file.name)
+se = add.spacet(se)
+se$sample_tissue = paste0(se$sample_id, '-', se$interface)
+se$source = gsub('S', 'P', se$source) #change coding of patients from "S_n" to "P_n" 
+
+se@reductions$umap.STACAS = se.STACAS@reductions$umap
+se.STACAS@reductions$umap.nc = se@reductions$umap
+
+n.clusters = length(unique(se$seurat_clusters))
+ns = length(unique(se$sample_id))
+
+SpatialDimPlot(se.STACAS, group.by = c('interface', 'STACAS.clusters'), ncol = 4)
+```
+As the metastases tend to be very uniform, we perform a pseudobulking on Tumor, Interface and Stroma regions as identified by SpaCET
+```{r pseudobulk}
+DefaultAssay(se) = 'Spatial'
+se.agg = AggregateExpression(se, return.seurat = TRUE, group.by = c('interface', 'source'))
+se.agg = FindVariableFeatures(se.agg)
+se.agg = RunPCA(se.agg, npcs = 10)
+se.agg = RunUMAP(se.agg, dims = 1:10, n.neighbors = 12)
+DimPlot(se.agg, group.by = c('source', 'interface'))
+```
+Definitions of functions for pathway analyses
+```{r decoupleR functions}
+# takes in net (source and target from the database) and returns the se adapted assay
+run_decoupler = function(se,
+                         net,
+                         .source = 'source',
+                         .target = 'target',
+                         .mor = 'weight',
+                         assay = 'SCT',
+                         store_as = 'progeny',
+                         batch_kw = c(),
+                         pvalue_filter = FALSE,
+                         p_all = FALSE,
+                         minsize = 5) {
+  model = 'ulm'
+  acts = c()
+  assay_name = paste0(model, '_', store_as)
+  
+  net = net %>%
+    mutate(across(.source, str_replace_all, '_', '-'))
+  net = na.omit(net)
+  
+  if (length(batch_kw) == 0) {
+    se$batch = 'all'
+    batch_kw = 'batch'
+  }
+  for (source in as.matrix(unique(se[[batch_kw]]))) {
+    print(paste('Processing patient sample:', source))
+    se.partial = se[, se[[batch_kw]] == source]
+    print(se.partial)
+    
+    if (assay == 'Spatial') {
+      mat = as.matrix(se.partial@assays[[assay]]$data)
+    } else {
+      mat = as.matrix(se.partial@assays[[assay]]$data)
+    }
+    print(mat[1:5, 1:5])
+    
+    if (.mor != '') {
+      acts_source = run_ulm(
+        mat = mat,
+        net = net,
+        .source = .source,
+        .target = .target,
+        .mor = .mor,
+        minsize = minsize,
+      )
+    } else {
+      acts_source = run_ulm(
+        mat = mat,
+        net = net,
+        .source = .source,
+        .target = .target,
+        minsize = minsize,
+      )
+    }
+    
+    acts = rbind(acts, acts_source)
+  }
+  
+  acts$p_value_adj = p.adjust(acts$p_value, method = 'fdr')
+  
+  if (pvalue_filter == TRUE){ # modify it so it removes anything above 0.05
+    if (p_all == FALSE){
+      sig_acts = unique(acts[acts['p_value_adj'] <= 0.05, ][['source']])
+    } else{
+      sig_acts = setdiff(unique(acts[['source']]), unique(acts[acts['p_value_adj'] > 0.05, ][['source']]))
+    }
+    acts = acts[acts[['source']] %in% sig_acts, ]
+  }
+  
+  se[[assay_name]] = acts %>%
+    filter(statistic == model) %>%
+    pivot_wider(id_cols = 'source',
+                names_from = 'condition',
+                values_from = 'score') %>%
+    column_to_rownames('source') %>%
+    Seurat::CreateAssayObject(.)
+  
+  
+  message(print(acts[1:10,]))
+  p_vals = acts %>%
+    filter(statistic == model) %>%
+    pivot_wider(id_cols = 'source',
+                names_from = 'condition',
+                values_from = 'p_value_adj') %>%
+    column_to_rownames('source')
+  print('pvals')
+  print(p_vals[1:5, 1:5])
+  
+  se[[assay_name]]@misc$pvals = p_vals[rownames(se[[assay_name]]),]
+  
+  
+
+  
+  se[[assay_name]]@misc$acts_long = acts
+  # Change assay
+  DefaultAssay(object = se) = assay_name
+  
+  # Scale the data
+  se = ScaleData(se)
+  se@assays[[assay_name]]@data = se@assays[[assay_name]]@scale.data
+  
+  
+  
+  return(se)
+}
+
+QC_plot = function(se,
+                   reduction = 'umap',
+                   features = c(),
+                   demo_slides = c('S1_C1', 'S2_B1', 'S3_D1', 'S4_A1'),
+                   assay = 'ulm_progeny',
+                   verbose = TRUE) {
+  DefaultAssay(se) = assay
+  if (length(features == 0)) {
+    top_features = rownames(se)
+  }
+  
+  max_features = 20
+  if (length(features) > max_features) {
+    print(paste(
+      'Selecting top',
+      max_features,
+      'features out of',
+      length(features)
+    ))
+    feature_ranges = apply(se@assays[[assay]]@data, 1, max) - apply(se@assays[[assay]]@data, 1, min)
+    feature_ranges = feature_ranges[order(feature_ranges, decreasing = TRUE)]
+    features = names(feature_ranges)[1:max_features]
+    if (verbose == TRUE) {
+      print(feature_ranges)
+      print('Features with the largest span over all sources:')
+      print(features)
+    }
+  } else {
+    print(paste('features:', length(features)))
+  }
+  p1 <- DimPlot(
+    se,
+    group.by = 'interface',
+    reduction = reduction,
+    label = TRUE,
+    pt.size = 0.25,
+    alpha = 0.75,
+    cols = c('darkgrey',  'black', 'gold1')
+  ) + ggtitle('Tissue categories')
+  
+  # print('ffff')
+  p2 = FeaturePlot(
+    se,
+    reduction = reduction,
+    ncol = 3,
+    features = features,
+    combine = FALSE
+  )
+  p2 = lapply(
+    X = p2,
+    FUN = function(x)
+      x + theme(plot.title = element_text(size = 5)) &
+      scale_colour_gradient2(
+        low = 'blue',
+        mid = 'white',
+        high = 'red'
+      )
+  )
+  
+  p2 = marrangeGrob(p2,
+                    ncol = 4,
+                    nrow = 4,
+                    top = assay)
+  
+  p3 = DimPlot(
+    se,
+    reduction = reduction,
+    group.by = 'source',
+    pt.size = 0.25,
+    alpha = 0.75
+  )
+  print(p1 - p3)
+  print(p2)
+  
+  for (slide in demo_slides) {
+    print(
+      SpatialFeaturePlot(
+        se,
+        features = features,
+        ncol = 4,
+        images = slide,
+        image.alpha = 0.5
+      )
+    )
+  }
+}
+
+
+plot_results = function(assay = 'ulm_progeny',
+                        folder = '/home/rstudio/mod/results/progeny/',
+                        reduction = 'umap',
+                        verbose = TRUE) {
+  dir.create(folder,
+             recursive = TRUE,
+             showWarnings = FALSE)
+  print('Plotting results')
+  pathways = rownames(se@assays[[assay]]@data)
+  n_paths = length(pathways)
+  
+  
+  if (n_paths > 100) {
+    print(paste('Selecting top 100 features out of', n_paths))
+    pth_ranges = apply(se@assays[[assay]]@data, 1, max) - apply(se@assays[[assay]]@data, 1, min)
+    pth_ranges = pth_ranges[order(pth_ranges, decreasing = TRUE)]
+    pathways = names(pth_ranges)[1:100]
+    n_paths = 100
+    if (verbose == TRUE) {
+      print(pth_ranges)
+    }
+  }
+  
+  ncol = 4
+  nrow = ceiling(length(pathways) / ncol)
+  
+  i = 1
+  plt.list = list()
+  
+  is = 1
+  plt.list.s = list()
+  
+  for (path in pathways) {
+    print(path)
+    p = SpatialFeaturePlot(
+      object = se,
+      features = path,
+      pt.size = 1.75,
+      image.alpha = 0,
+      ncol = 4,
+      combine = FALSE
+    )
+    p = lapply(
+      X = p,
+      FUN = function(x)
+        x + theme(plot.title = element_text(size = 5))
+    )
+    p = marrangeGrob(p,
+                     ncol = 4,
+                     nrow = 3,
+                     top = assay)
+    png(
+      paste0(folder, path, '.png'),
+      width = 350 * 4,
+      height = 350 * 3,
+      units = "px"
+    )
+    print(p)
+    # print(marrangeGrob(plt.list, nrow = 1, ncol = 1))
+    dev.off()
+    
+    pdf(paste0(folder, path, '.pdf'),
+        height = 5 * ncol,
+        width = 5 * nrow)
+    print(p)
+    # print(marrangeGrob(plt.list, nrow = 1, ncol = 1))
+    dev.off()
+    # is=1
+    ps = (
+      FeaturePlot(
+        se,
+        features = path,
+        pt.size = 0.6,
+        reduction = reduction,
+        split.by = 'source',
+        combine = TRUE,
+        keep.scale = 'feature'
+      ) &
+        scale_colour_gradient2(
+          low = 'blue',
+          mid = 'white',
+          high = 'red'
+        )
+    )
+    
+    for (k in 1:4) {
+      ps[[k]] = ps[[k]] + theme_void()
+      plt.list.s[[is]] = ps[[k]]
+      is = is + 1
+    }
+    cowplot::plot_grid(plt.list.s[[1]] |
+                         plt.list.s[[2]] | plt.list.s[[3]] | plt.list.s[[4]])
+    
+    
+    p = (
+      FeaturePlot(
+        se,
+        features = path,
+        pt.size = 0.6,
+        reduction = reduction
+      ) &
+        scale_colour_gradient2(
+          low = 'blue',
+          mid = 'white',
+          high = 'red'
+        )
+    )
+    
+    plt.list[[i]] = p
+    i = i + 1
+  }
+  png(
+    paste0(folder, 'scores_umap_split.png'),
+    width = 300 * 4,
+    height = 300 * length(unique(se$sample_id)),
+    units = "px"
+  )
+  print(marrangeGrob(
+    plt.list.s,
+    ncol = 4,
+    nrow = n_paths,
+    layout_matrix = matrix(
+      seq_len(4 * n_paths),
+      nrow = n_paths,
+      ncol = 4,
+      byrow = TRUE
+    )
+  ))
+  dev.off()
+  
+  png(
+    paste0(folder, 'scores_umap.png'),
+    width = 600 * ncol,
+    height = 600 * nrow,
+    units = "px"
+  )
+  print(marrangeGrob(plt.list, nrow = nrow, ncol = ncol))
+  dev.off()
+  
+  pdf(
+    paste0(folder, 'scores_umap.pdf'),
+    width = 30 * ncol,
+    height = 30 * nrow
+  )
+  print(marrangeGrob(plt.list, nrow = nrow, ncol = ncol))
+  dev.off()
+}
+
+
+
+plot_heatmap = function(se,
+                        assay,
+                        star = TRUE,
+                        verbose = TRUE) {
+  dir.create(output_folder,
+             recursive = TRUE,
+             showWarnings = FALSE)
+  pathways = rownames(se@assays[[assay]]@data)
+  max_path = 10000
+  if (length(pathways) > max_path) {
+    print(paste(
+      'Selecting top',
+      max_path,
+      'features out of',
+      length(pathways)
+    ))
+    pth_ranges = apply(se@assays[[assay]]@data, 1, max) - apply(se@assays[[assay]]@data, 1, min)
+    pth_ranges = pth_ranges[order(pth_ranges, decreasing = TRUE)]
+    pathways = names(pth_ranges)[1:max_path]
+    n_paths = max_path
+    if (verbose == TRUE) {
+      print(pth_ranges)
+    }
+  } else{
+    pathways = pathways
+  }
+  
+  df <- t(as.matrix(se@assays[[assay]]@data[pathways, ])) %>%
+    as.data.frame() %>%
+    mutate(tissue = se$interface) %>%
+    mutate(donor = se$source) %>%
+    pivot_longer(
+      cols = !c(donor, tissue),
+      names_to = "source",
+      values_to = "score"
+    ) %>%
+    group_by(donor, tissue, source) %>%
+    summarise(mean = mean(score))
+  
+  # Transform to wide matrix
+  
+  top_acts_mat = df %>%
+    pivot_wider(
+      id_cols = c('donor', 'tissue'),
+      names_from = 'source',
+      values_from = 'mean'
+    )
+  cnames = paste0(top_acts_mat$donor, '_', top_acts_mat$tissue)
+  
+  annotation.df = as.data.frame(top_acts_mat[, c('donor', 'tissue')])
+  annotation.df[sapply(annotation.df, is.character)] = lapply(annotation.df[sapply(annotation.df, is.character)],
+                                                              as.factor)
+  
+  top_acts_mat$donor = NULL
+  top_acts_mat$tissue = NULL
+  
+  top_acts_mat = t(top_acts_mat)
+  colnames(top_acts_mat) = cnames
+  rownames(annotation.df) = colnames(top_acts_mat)
+  
+  ### Prepare the pvalues
+  act_areas = unique(paste0(se$interface, '_',  se$source))
+  df_p = t(as.matrix(se@assays[[assay]]@misc$pvals[pathways, ]))[act_areas, ]
+  df_p = df_p %>%
+    as.data.frame() %>%
+    mutate(tissue = se$interface) %>%
+    mutate(donor = se$source) %>%
+    pivot_longer(
+      cols = !c(donor, tissue),
+      names_to = "source",
+      values_to = "score"
+    ) %>%
+    group_by(donor, tissue, source) %>%
+    summarise(p_value = mean(score))
+  
+  df_p$stars = cut(
+    df_p$p_value,
+    breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+    label = c("***", "**", "*", "")
+  )
+  
+  top_acts_mat_star <- df_p %>%
+    pivot_wider(
+      id_cols = c('donor', 'tissue'),
+      names_from = 'source',
+      values_from = 'stars'
+    )
+  top_acts_mat_star$donor = NULL
+  top_acts_mat_star$tissue = NULL
+  
+  top_acts_mat_star = t(top_acts_mat_star)
+  colnames(top_acts_mat_star) = cnames # and now you have the pvalues
+  
+  
+  # Choose color palette
+  palette_length = 100
+  my_color = colorRampPalette(c("Darkblue", "white", "red"))(palette_length)
+  
+  my_breaks <-
+    c(seq(-2, 0, length.out = ceiling(palette_length / 2) + 1),
+      seq(0.05, 2, length.out = floor(palette_length / 2)))
+  
+  # create the color palette
+  tissue = c(
+    Stroma = "darkgrey",
+    Interface = "black",
+    Tumor = "gold1"
+  )
+  tissue = tissue[c(unique(se$interface))]
+  annoCol = list(tissue = tissue)
+  
+  donor = c(
+    'P1' = 'darkorchid3',
+    'P2' = 'yellow4',
+    'P3' = 'pink3',
+    'P4' = 'dodgerblue4'
+  )
+  donor = donor[c(unique(se$source))]
+  annoCol = append(list(donor = donor), annoCol)
+  
+  
+  annoCol = append(list(tissue = annoCol$tissue[unique(annotation.df$tissue)]),
+                   c(list(donor = annoCol$donor[unique(annotation.df$donor)])))
+  
+  if (star == TRUE){
+      pph = pheatmap(
+    top_acts_mat,
+    annotation_col = annotation.df,
+    annotation_colors = annoCol,
+    border_color = NA,
+    color = my_color,
+    breaks = my_breaks,
+    fontsize = 7,
+    display_numbers = top_acts_mat_star
+    # cluster_cols = FALSE
+  )
+  } else {
+      pph = pheatmap(
+    top_acts_mat,
+    annotation_col = annotation.df,
+    annotation_colors = annoCol,
+    border_color = NA,
+    color = my_color,
+    breaks = my_breaks,
+    fontsize = 3,
+
+  )
+  }
+
+  return(pph)
+  
+}
+```
+
+```{r progeny, fig.height=15, fig.width=15, warning=FALSE, paged.print=TRUE}
+se = se.agg
+net = get_progeny(organism = 'human', top = 100) # 100 genes from the human database
+
+assay = 'progeny_aggregate'
+assay_name = paste0('ulm_', assay) # ulm is the default in all of these
+output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+
+
+se = run_decoupler(
+  se = se,
+  net = net,
+  assay = 'SCT',
+  store_as = assay,
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE
+  # batch_kw = 'interface'
+)
+
+## comment out for spatial non-pseudobulk version
+# QC_plot(
+#   se,
+#   reduction = 'umap.STACAS',
+#   features = rownames(se),
+#   assay = assay_name,
+#   # demo_slides = c('S2_A1')
+# )
+
+plot_results(
+  assay = assay_name,
+  folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/'),
+  reduction = 'umap.STACAS'
+)
+
+scores = se@assays[[assay_name]]@misc$acts_long
+write.table(
+  scores,
+  file = paste0(
+    '/home/rstudio/mod/results/decoupler/',
+    assay,
+    '/scores_',
+    assay_name,
+    '.tsv'
+  ), 
+  sep = '\t',
+  quote = FALSE
+)
+
+
+SpatialDimPlot(se.STACAS, group.by = 'seurat_clusters', ncol = 4)
+se$stacas_clusters = se.STACAS$seurat_clusters
+
+# se$source = gsub('S', 'P', se$source)
+
+pph = plot_heatmap(se,
+                   assay = assay_name)
+pdf(
+  paste0(output_folder, assay, '_scores_pheatmap.pdf'),
+  width = 5,
+  height = 0.4 * length(rownames(se))
+)
+print(pph)
+dev.off()
+
+
+pph = plot_heatmap(se[, se$interface == 'Tumor'],
+                   assay = assay_name)
+pdf(
+  paste0(output_folder, assay, '_scores_pheatmap_Tumor.pdf'),
+  width = 5,
+  height = 0.4 * length(rownames(se))
+)
+print(pph)
+dev.off()
+
+```
+
+
+```{r fig.height=15, fig.width=15}
+# net = get_resource('MSigDB', organism = 'human')
+# msigdb_colections = unique(net[, 'collection'])
+# collection = 'hallmark'
+# net = net[net[, 'collection'] == collection, ]
+
+net = msigdbr(
+  species = "human", 
+  category = "H"
+  )
+
+net = distinct(
+  net, 
+  diff = paste0(gs_name, human_gene_symbol),
+  .keep_all = TRUE
+  )
+
+assay = 'msigdb_aggregate'
+assay_name = paste0('ulm_', assay) # ulm is the default in all of these
+output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+
+## reuse the mat from before (keep it consistent between methods)
+se = run_decoupler(
+  se = se,
+  net = net, 
+  .source='gs_name',
+  .target='human_gene_symbol',
+  .mor='',
+  assay = 'Spatial', 
+  store_as = assay, 
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = TRUE
+  # batch_kw = 'interface'
+)
+
+scores = se@assays[[assay_name]]@misc$acts_long
+write.table(
+  scores,
+  file = paste0(
+    '/home/rstudio/mod/results/decoupler/',
+    assay,
+    '/scores_',
+    assay_name,
+    '.tsv'
+  ), 
+  sep = '\t',
+  quote = FALSE
+)
+
+## comment out for spatial non-pseudobulk version
+#
+# QC_plot(
+#     se, 
+#     reduction='umap.STACAS',
+#     features=rownames(se),
+#     assay = assay_name
+# )
+
+se = RunPCA(
+  se, 
+  assay = assay_name, 
+  npcs = 50, 
+  features = se[[assay_name]]$counts@Dimnames[[1]]
+)
+
+se = FindNeighbors(
+  se,
+  reduction = "pca",
+  do.plot = TRUE,
+  dims = 1:49,
+  k.param = 60,
+  prune.SNN = 1 / 15
+)
+se = FindClusters(
+  se,
+  resolution = 1.0,
+  cluster.name = paste0(assay_name, '.clusters'),
+  algorithm = 4
+)
+
+p2 = DimPlot(
+  se,
+  group.by = c('source'),
+  pt.size = 0.5,
+  alpha = 0.75,
+  reduction = 'umap.STACAS',
+  cols = brew.pal.source
+)
+p3 = DimPlot(
+  se,
+  group.by = c(paste0(assay_name, '.clusters')),
+  pt.size = 0.5,
+  alpha = 0.75,
+  reduction = 'umap.STACAS'
+)
+
+p3 - p2
+
+se = BuildClusterTree(se, features =  se[[assay_name]]$counts@Dimnames[[1]])
+PlotClusterTree(se)
+
+plot_results(
+    assay=assay_name,
+    folder=paste0('/home/rstudio/mod/results/decoupler/', assay, '/'),
+    reduction = 'umap.STACAS'
+)
+
+
+SpatialDimPlot(se.STACAS, group.by = 'seurat_clusters', ncol = 4)
+se$stacas_clusters = se.STACAS$seurat_clusters
+
+# se$source = gsub('S', 'P', se$source)
+
+pph = plot_heatmap(se, 
+             assay = assay_name
+             )
+pdf(paste0(output_folder, assay,'_scores_pheatmap.pdf'),  
+          width = 6, 
+          height = 0.15*length(rownames(se))
+        ) 
+  print(pph)
+  dev.off()
+
+
+pph = plot_heatmap(se[, se$interface == 'Tumor'], 
+             assay = assay_name
+             )
+pdf(paste0(output_folder, assay,'_scores_pheatmap_Tumor.pdf'),  
+          width = 6, 
+          height = 0.15*length(rownames(se))
+        ) 
+print(pph)
+dev.off()
+```
+
+```{r TF pseudobulk, fig.height=25, fig.width=25}
+net = get_collectri(organism = "human", split_complexes=FALSE)
+
+assay = 'collecttri_TF_aggregate'
+assay_name = paste0('ulm_', assay) # ulm is the default in all of these
+## reuse the mat from before (keep it consistent between methods)
+output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+
+se = run_decoupler(
+  se = se,
+  net = net, 
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'SCT', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = TRUE
+  # batch_kw = 'sample_id'
+)
+
+scores = se@assays[[assay_name]]@misc$acts_long
+write.table(
+  scores,
+  file = paste0(
+    '/home/rstudio/mod/results/decoupler/',
+    assay,
+    '/scores_',
+    assay_name,
+    '.tsv'
+  ), 
+  sep = '\t',
+  quote = FALSE
+)
+
+## comment out for spatial non-pseudobulk version
+#
+# QC_plot(
+#     se, 
+#     reduction='umap.STACAS',
+#     features=rownames(se),
+#     assay = assay_name
+# )
+
+plot_results(
+    assay=assay_name,
+    folder=paste0('/home/rstudio/mod/results/decoupler/', assay, '/'),
+    reduction = 'umap.STACAS'
+)
+
+scores = se@assays[[assay_name]]
+saveRDS(
+  scores,
+  file=paste0('/home/rstudio/mod/results/decoupler/', assay, '/scores_', assay_name, '.rds')
+  )
+
+se@assays[[assay_name]] = readRDS(paste0('/home/rstudio/mod/results/decoupler/', assay, '/scores_', assay_name, '.rds'))
+
+
+pph = plot_heatmap(se, 
+             assay = assay_name,
+             star = FALSE
+             )
+pdf(paste0(output_folder, assay,'_scores_pheatmap_nostar.pdf'),  
+          width = 3, 
+          height = 0.05*length(rownames(se))
+        ) 
+  print(pph)
+  dev.off()
+
+
+pph = plot_heatmap(se[, se$interface == 'Tumor'], 
+             assay = assay_name,
+             star = FALSE
+             )
+pdf(paste0(output_folder, assay,'_scores_pheatmap_Tumor_nostar.pdf'),  
+          width = 2, 
+          height = 0.05*length(rownames(se))
+        ) 
+print(pph)
+dev.off()
+
+```
+

@@ -1,0 +1,181 @@
+---
+title: "inferCNV Notebook"
+output: html_notebook
+---
+This is the inferCNV notebook, it would be interesting to expand into the whole SPATA package (assuming it will be less buggy than the inferCNV part)
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/home/rstudio/')
+source('/home/rstudio/mod/bin/utils.R', 
+       local = TRUE
+       )
+
+library(infercnv)
+library(Seurat)
+
+# devtools::install_github(repo = "kueckelj/confuns")
+# devtools::install_github(repo = "theMILOlab/SPATAData")
+# install.packages("fftwtools")
+# BiocManager::install('EBImage')
+
+
+# devtools::install_github(repo = "theMILOlab/SPATA2")
+
+# if you want to use monocle3 related wrappers 
+# devtools::install_github('cole-trapnell-lab/leidenbase')
+# BiocManager::install("BayesSpace") # this takes a while
+library(SPATA2)
+library(RColorBrewer)
+
+```
+
+```{r define paths and vars}
+gene_order_file_path = '/home/rstudio/data/gencode_v19_gene_pos.txt'
+result.folder = '/home/rstudio/mod/results/infercnv/'
+st.folder = '/home/rstudio/data/stdata/'
+run.HMM = FALSE
+
+sources = c('S1', 'S2', 'S3', 'S4')
+
+curr.dir = '/home/rstudio/'
+output.folder = paste0('/home/rstudio/mod/results/spata_cnv/')
+
+# sources = c('S3', 'S4')
+```
+
+```{r set a source/sample palette}
+cluster.pal = 'Paired' # cluster palette
+
+if(length(sources) == 1){
+  brew.pal.sample = brewer.pal(n = ns, name = 'Set1')
+} else {
+  palettes=list()
+  palettes[['S1']] = c('#e06666', '#ecb8b8')
+  palettes[['S2']] = c('#28f618', '#25d283', '#23bfbb')
+  palettes[['S3']] = c('#e2f4c7', '#eae374', '#f9d62e')
+  palettes[['S4']] = c('#8d8bf1', '#5843a2', '#41296a', '#8638b7')
+
+  brew.pal.sample = c()
+  
+  for(s in 1:length(unique(sources))){
+    s.name = sources[s]
+    brew.pal.sample = c(brew.pal.sample, palettes[[s.name]])
+  }
+get.brewer.pal = colorRampPalette(brewer.pal(9, cluster.pal))
+}
+
+```
+
+
+```{r load seurat}
+se.corr = readRDS('/home/rstudio/mod/data/transcriptome_analysis/STACAS_integrated.rds')
+se.corr = add.spacet(se.corr)
+se.corr$sample_tissue = paste0(se.corr$sample_id, '-', se.corr$interface)
+```
+```{r load seurat, fig.height=10, fig.weight=10}
+SpatialDimPlot(se.corr, group.by = 'interface', ncol = 4)
+```
+
+
+```{r load normal melanocytes}
+# process the matrix
+scref_melan_mtx = read.csv('./mod/data/scrnaseq/melanocytes/GSE151091_raw_matrix.csv.gz')
+row.names(scref_melan_mtx) = scref_melan_mtx$X
+scref_melan_mtx$X = NULL
+scref_melan_mtx = t(scref_melan_mtx)
+
+#process the associated annotation
+scref_melan_annot = read.csv('./mod/data/scrnaseq/melanocytes/GSE151091_Metadata.csv.gz')
+rownames(scref_melan_annot) = scref_melan_annot$cell_id
+
+# for some reason, the metadata and matrix cell names do not overlap completely
+cells = intersect(scref_melan_annot$cell_id, rownames(scref_melan_mtx))
+                   
+scref_melan_mtx = as.data.frame(scref_melan_mtx[cells, ])
+scref_melan_annot = scref_melan_annot[cells, ]
+scref_melan_mtx$ct = as.character(scref_melan_annot$class_3)
+
+# we subset for adult melanocytes (adt_cutaneous_mel)
+scref_melan_mtx = scref_melan_mtx[scref_melan_mtx$ct == 'adt_cutaneous_mel', ]
+scref_melan_mtx$ct = NULL
+
+scref_melan_annot = scref_melan_annot[rownames(scref_melan_mtx), ]
+scref_melan_annot_sel = as.data.frame(scref_melan_annot[, c('class_3')])
+rownames(scref_melan_annot_sel) = rownames(scref_melan_annot)
+colnames(scref_melan_annot_sel) = 'sample'
+scref_melan_annot_sel$sample = 'Adult Cutaneous Melanocyte' # rename to something more descriptive
+
+write.table(scref_melan_annot_sel, file = 'sc_melanocytes_annot.csv', quote = FALSE, sep = ',')
+write.table(scref_melan_mtx, file = 'sc_melanocytes_mtx.csv', quote = FALSE, sep = ',')
+
+
+scref_melan_annot_sel = read.table('sc_melanocytes_annot.csv', sep = ',')
+scref_melan_mtx = read.table('sc_melanocytes_mtx.csv', sep = ',')
+```
+
+
+```{r run inferCNV}
+for(source in sources[4:4]){
+  print(source)
+  source.folders = grep(source, list.dirs(st.folder, recursive = FALSE, full.names = TRUE), value=TRUE)
+  source.folders.names = grep(source, list.dirs(st.folder, recursive = FALSE, full.names = FALSE), value=TRUE)
+  res.dir.top = paste0(result.folder, source, '/')
+  dir.create(res.dir.top, recursive = TRUE, showWarnings = FALSE)
+  i=4
+  
+  for (folder in source.folders){
+    print(source.folders.names[i])
+    res.dir = paste0(res.dir.top, source.folders.names[i], '/')
+    dir.create(res.dir, showWarnings = FALSE)
+    se.corr.sample = se.corr[, se.corr$sample_id == source.folders.names[i]]
+    DefaultAssay(se.corr.sample) = 'Spatial'
+    
+    infer.ann = se.corr.sample@meta.data
+    infer.ann = data.frame(infer.ann['interface'])
+    colnames(infer.ann) = c('sample')
+    ref_annot = SPATA2::cnv_ref$annotation
+    ref_annot$sample = 'SPATA2 brain reference'
+
+    infer.ann = rbind(infer.ann, ref_annot, scref_melan_annot_sel)
+    write.table(infer.ann, 
+                paste0(result.folder, '/infercnv_annotation.txt'), 
+                row.names = TRUE, 
+                col.names = FALSE, 
+                quote = FALSE, 
+                sep='\t')
+    
+    se.mtx = as.matrix(se.corr.sample@assays$Spatial@layers$counts)
+    colnames(se.mtx) = colnames(se.corr.sample)
+    rownames(se.mtx) = rownames(se.corr.sample)
+
+    merged.counts = merge(as.data.frame(se.mtx), as.data.frame(SPATA2::cnv_ref$mtr), by='row.names', all.x = TRUE)
+    row.names(merged.counts) = merged.counts$Row.names
+    merged.counts$Row.names = NULL
+    
+    merged.counts = merge(merged.counts, as.data.frame(t(scref_melan_mtx)), by='row.names', all.x = TRUE)
+    row.names(merged.counts) = merged.counts$Row.names
+    merged.counts$Row.names = NULL
+    merged.counts = na.omit(merged.counts)
+    
+    
+    infercnv_obj = CreateInfercnvObject(raw_counts_matrix=as.matrix(merged.counts),
+                                      annotations_file=paste0(result.folder, '/infercnv_annotation.txt'), 
+                                      delim="\t",
+                                      gene_order_file=gene_order_file_path,
+                                      ref_group_names=c('SPATA2 brain reference', 'Adult Cutaneous Melanocyte')
+                                      ) 
+    
+    infercnv_obj = infercnv::run(infercnv_obj,
+                               cutoff=0.1, # cutoff=0.1 is what SPATA2 uses
+                               out_dir=res.dir, 
+                               denoise=TRUE,
+                               HMM=run.HMM,
+                               save_rds=TRUE,
+                               num_threads=1,
+                               write_expr_matrix=TRUE)
+    i= i+1
+    gc()
+    }
+}
+```
+
