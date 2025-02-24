@@ -13,9 +13,11 @@ knitr::opts_knit$set(root.dir = '/home/rstudio/')
 
 ```{r, include=FALSE}
 setwd('../rstudio/mod/')
-devtools::install_github("nicolash2/ggdendroplot")
-install.packages('reshape2')
-install.packages('ggplotify')
+# install.packages('Hmisc')
+library(Hmisc)
+# devtools::install_github("nicolash2/ggdendroplot")
+# install.packages('reshape2')
+# install.packages('ggplotify')
 library(ggplotify)
 library(reticulate)
 library(remotes)
@@ -25,6 +27,10 @@ library(remotes)
 # BiocManager::install('GSVA')
 # BiocManager::install("decoupleR", ask = FALSE, force = TRUE)
 # remotes::install_github('https://github.com/saezlab/OmnipathR.git')
+# BiocManager::install(c("GenomeInfoDb", "XVector", "Biostrings", "KEGGREST", "S4Vectors", "IRanges", "annotate", "AnnotationDbi", "genefilter", "sva"))
+# install.packages('devtools', quiet=TRUE)
+# install.packages('Hmisc')
+# devtools::install_github("data2intelligence/SpaCET", quiet=TRUE)
 # install.packages('msigdbr')
 # remotes::install_github('https://github.com/saezlab/decoupleR.git')
 library(RColorBrewer)
@@ -49,10 +55,17 @@ library(msigdbr)
 library(Seurat)
 library(stats)
 options(Seurat.object.assay.version = "v5")
+options(future.globals.maxSize = 3000 * 1024^2)  # Set to 3 GB
 
 source('/home/rstudio/mod/bin/utils.R', 
        local = TRUE
        )
+
+filter_mt_rb_genes = function(ds){
+  mt_rb_genes = grepl('^MT',rownames(ds),  ignore.case = TRUE) | grepl('^RPL',rownames(ds),  ignore.case = TRUE) | grepl('^RPS',rownames(ds),  ignore.case = TRUE)
+  ds = ds[mt_rb_genes == FALSE, ]
+  return(ds)
+}
 ```
 
 ```{r slide batches}
@@ -80,40 +93,263 @@ if(length(unique(sources)) == 1){
   }
 get.brewer.pal = colorRampPalette(brewer.pal(16, cluster.pal))
 }
+
+ct_map_main = list(
+  "Activated B cells" = "B/Plasma cells" ,
+  "Astrocytes" = "Astrocytes",
+  "CAFs" = "CAFs",
+  "CD4+ T cells" = "T cells",
+  "CD8+ T cells TCF7+" = "T cells",
+  "CD8+ T cells TOX+" = "T cells",
+  "DC3" = "Myeloid cells",
+  "Endothelial cells" = "Endothelial cells",
+  "MDM" = "Myeloid cells",
+  "MDM FTL+" = "Myeloid cells",
+  "Microglia"  = "Microglia",
+  "Monocytes"     = "Myeloid cells",
+  "NK cells"  = "NK cells",
+  "Naïve B cells"  = "B/Plasma cells",
+  "Neurons"  = "Neurons",
+  "Oligodendrocytes" = "Oligodendrocytes",
+  "Pericytes"    = "Pericytes",
+  "Plasma cells"     = "B/Plasma cells",
+  "T-cell doublets" = "doublets",
+  "Tfh-like cells" = "T cells",
+  "Tregs" =  "T cells",
+  "Tumor cells" = "Tumor cells",
+  "cDC1" = "Myeloid cells",
+  "cDC2" = "Myeloid cells"
+)
+ct_main = unique(unlist(ct_map_main))
+ct_main = ct_main[ct_main != 'doublets']
+ct_main = gsub('Tumor cells', 'Malignant', ct_main)
 ```
 
 ```{r load seurat object, fig.height=20}
-file.name = paste0('./mod/data/transcriptome_analysis/', paste0(sources, collapse ='-'), '_pre_processed_slides_merged.rds')
-file.name.STACAS = paste0('/home/rstudio/mod/data/transcriptome_analysis/STACAS_integrated.rds')
-se.STACAS = readRDS(file.name.STACAS)
+# file.name = paste0('./mod/data/transcriptome_analysis/', paste0(sources, collapse ='-'), '_pre_processed_slides_merged.rds')
+# file.name.STACAS = paste0('/home/rstudio/mod/data/transcriptome_analysis/STACAS_integrated.rds')
+# # se.STACAS = readRDS(file.name.STACAS)
+# 
+# se1 = readRDS(file.name)
+# se = NormalizeData(se, assay = 'Spatial')
+# se = add.spacet(se, force_interface = TRUE)
+# se$sample_tissue = paste0(se$sample_id, '-', se$interface)
+# se$source = gsub('S', 'P', se$source) #change coding of patients from "S_n" to "P_n" 
 
-se = readRDS(file.name)
-se = add.spacet(se)
-se$sample_tissue = paste0(se$sample_id, '-', se$interface)
-se$source = gsub('S', 'P', se$source) #change coding of patients from "S_n" to "P_n" 
+se = readRDS('./mod/data/decoupleR_se.rds')
 
-se@reductions$umap.STACAS = se.STACAS@reductions$umap
-se.STACAS@reductions$umap.nc = se@reductions$umap
+
+# se@reductions$umap.STACAS = se.STACAS@reductions$umap
+# se.STACAS@reductions$umap.nc = se@reductions$umap
 
 n.clusters = length(unique(se$seurat_clusters))
 ns = length(unique(se$sample_id))
 
-SpatialDimPlot(se.STACAS, group.by = c('interface', 'STACAS.clusters'), ncol = 4)
+SpatialDimPlot(se, group.by = c('interface'), ncol = 4, image.alpha = 0, pt.size.factor = 2, crop=FALSE)
+SpatialFeaturePlot(se, features = c('Malignant'), ncol = 4, image.alpha = 0, pt.size.factor = 2, crop=FALSE)
+
+pdf('/home/rstudio/mod/results/decoupler/info/interface.pdf',
+  height = 8,
+  width = 12
+)
+print(SpatialDimPlot(se, group.by = c('interface'), ncol = 4, image.alpha = 0, pt.size.factor = 2, crop=FALSE))
+dev.off()
+
+for (ct in rownames(se@reductions$SpaCET)){
+  se[[ct]] = se@reductions$SpaCET[ct, ]
+  pdf(paste0('/home/rstudio/mod/results/decoupler/info/', gsub('/', '-', ct),'.pdf'),
+  height = 8,
+  width = 12
+)
+  print(SpatialFeaturePlot(se, features = ct, ncol = 4, image.alpha = 0, pt.size.factor = 2, crop=FALSE))
+  dev.off()
+}
+
 ```
 As the metastases tend to be very uniform, we perform a pseudobulking on Tumor, Interface and Stroma regions as identified by SpaCET
-```{r pseudobulk}
-DefaultAssay(se) = 'Spatial'
-se.agg = AggregateExpression(se, return.seurat = TRUE, group.by = c('interface', 'source'))
-se.agg = FindVariableFeatures(se.agg)
-se.agg = RunPCA(se.agg, npcs = 10)
-se.agg = RunUMAP(se.agg, dims = 1:10, n.neighbors = 12)
-DimPlot(se.agg, group.by = c('source', 'interface'))
+
+As the metastases tend to be very uniform, we perform a pseudobulking on Tumor, Interface and Stroma regions as identified by SpaCET
+```{r melanoma scRNAseq, fig.height=10}
+file = '/home/rstudio/mod/data/naive_melanoma/scCancer_reference.RDS'
+if (!file.exists(file)){
+X = read.csv('./mod/data/naive_melanoma/X.csv', row.names = 1)
+meta = read.csv('./mod/data/naive_melanoma/metadata.csv', row.names = 1)
+X = as.matrix(X)
+gc()
+scCancer_reference = CreateSeuratObject(counts = t(X), meta.data = meta)
+scCancer_reference$source = scCancer_reference$orig.ident
+scCancer_reference$interface = ifelse(scCancer_reference$cell_type_main == "Tumor cells", "Tumor", "Stroma")
+scCancer_reference = NormalizeData(scCancer_reference)
+scCancer_reference = ScaleData(scCancer_reference)
+scCancer_reference = FindVariableFeatures(scCancer_reference)
+scCancer_reference = RunPCA(scCancer_reference, npcs = 50)
+scCancer_reference = RunUMAP(scCancer_reference, dims = 1:50, n.neighbors = 25)
+saveRDS(scCancer_reference, file=file)
+} else {
+  scCancer_reference = readRDS(file)
+}
+
+CAFs_positions = which(scCancer_reference@meta.data[["cell_type_fine"]] == 'CAFs')
+scCancer_reference$cell_type_main[CAFs_positions] = 'CAFs'
+DimPlot(scCancer_reference, group.by = c('source', 'cell_type_main', 'interface'))
+
+scCancer_reference.agg = AggregateExpression(scCancer_reference,return.seurat = TRUE, assays = 'RNA', group.by = c('interface', 'source'))
+scCancer_reference.agg$patient = gsub('.+_', '', scCancer_reference.agg$orig.ident)
+scCancer_reference.agg = FindVariableFeatures(scCancer_reference.agg)
+scCancer_reference.agg = RunPCA(scCancer_reference.agg, npcs = 15)
+scCancer_reference.agg = RunUMAP(scCancer_reference.agg, dims = 1:15, n.neighbors = 12)
+DimPlot(scCancer_reference.agg, group.by = c('source', 'interface'))
 ```
-Definitions of functions for pathway analyses
+
+```{r melanocytes, fig.height=10}
+file = './mod/data/scrnaseq/melanocytes/melanocyte_ref.rds'
+if (!file.exists(file)){
+X = read.csv('./mod/data/scrnaseq/melanocytes/GSE151091_raw_matrix.csv.gz', row.names = 1)
+meta = read.csv('./mod/data/scrnaseq/melanocytes/GSE151091_Metadata.csv.gz', row.names = 1)
+common_cells = intersect(colnames(X), rownames(meta))
+normal_reference = CreateSeuratObject(counts = X[, common_cells], meta.data =meta[common_cells,])
+normal_reference$interface = 'Stroma'
+normal_reference$source = normal_reference$patient
+
+normal_reference = NormalizeData(normal_reference)
+normal_reference = ScaleData(normal_reference)
+normal_reference = FindVariableFeatures(normal_reference)
+normal_reference = RunPCA(normal_reference, npcs = 50)
+normal_reference = RunUMAP(normal_reference, dims = 1:50, n.neighbors = 25)
+saveRDS(normal_reference, file = file)
+} else {
+  normal_reference = readRDS(file)
+}
+DimPlot(normal_reference, group.by = c('class_1', 'source', 'interface'))
+
+normal_reference.agg = AggregateExpression(normal_reference,return.seurat = TRUE, assays = 'RNA', group.by = c('interface', 'source'))
+normal_reference.agg$patient = gsub('.+_', '', normal_reference.agg$orig.ident)
+normal_reference.agg = FindVariableFeatures(normal_reference.agg)
+normal_reference.agg = RunPCA(normal_reference.agg, npcs = 15)
+normal_reference.agg = RunUMAP(normal_reference.agg, dims = 1:15, n.neighbors = 12)
+DimPlot(normal_reference.agg, group.by = c('source', 'interface'))
+```
+```{r merge, fig.height=8}
+# union_genes = intersect(rownames(se@assays[["Spatial"]]), rownames(normal_reference@assays$RNA))
+# union_genes = intersect(union_genes, rownames(scCancer_reference@assays$RNA))
+
+normal.ref.agg = AggregateExpression(normal_reference, group.by = c("source", "interface"), assays = "RNA", return.seurat = TRUE)
+normal.ref.agg$source = sapply(strsplit(colnames(normal.ref.agg), "_"), `[`, 1)
+normal.ref.agg = filter_mt_rb_genes(normal.ref.agg)
+normal.ref.agg = NormalizeData(normal.ref.agg)
+normal.ref.agg$interface = 'Stroma'
+normal.ref.agg$origin = 'control_ref'
+
+
+normal.refct.agg = AggregateExpression(normal_reference, group.by = c("source", "interface", "class_1"), assays = "RNA", return.seurat = TRUE)
+normal.refct.agg$source = sapply(strsplit(colnames(normal.refct.agg), "_"), `[`, 1)
+normal.refct.agg$cell_type = sapply(strsplit(colnames(normal.refct.agg), "_"), `[`, 2)
+normal.refct.agg = filter_mt_rb_genes(normal.refct.agg)
+normal.refct.agg = NormalizeData(normal.refct.agg)
+normal.refct.agg$interface = 'Stroma'
+normal.refct.agg$origin = 'control_ref_ct'
+normal.refct.agg$name = paste(normal.refct.agg$cell_type, normal.refct.agg$source)
+
+scCancer.agg = AggregateExpression(scCancer_reference, group.by = c("source", "interface"), assays = "RNA", return.seurat = TRUE)
+scCancer.agg$source = sapply(strsplit(colnames(scCancer.agg), "_"), `[`, 1)
+scCancer.agg$interface = sapply(strsplit(colnames(scCancer.agg), "_"), `[`, 2)
+scCancer.agg = filter_mt_rb_genes(scCancer.agg)
+scCancer.agg = NormalizeData(scCancer.agg)
+scCancer.agg$origin = 'cancer_ref'
+scCancer.agg$name = paste(scCancer.agg$interface, scCancer.agg$source)
+
+scCancerct.agg = AggregateExpression(scCancer_reference, group.by = c("source", "interface", "cell_type_main"), assays = "RNA", return.seurat = TRUE)
+scCancerct.agg$source = sapply(strsplit(colnames(scCancerct.agg), "_"), `[`, 1)
+scCancerct.agg$interface = sapply(strsplit(colnames(scCancerct.agg), "_"), `[`, 2)
+scCancerct.agg$cell_type = scCancerct.agg$cell_type_main
+scCancerct.agg = filter_mt_rb_genes(scCancerct.agg)
+scCancerct.agg = NormalizeData(scCancerct.agg)
+scCancerct.agg$origin = 'cancer_ref_ct'
+scCancerct.agg$cell_type = scCancerct.agg$cell_type_main
+scCancerct.agg$name = paste(scCancerct.agg$cell_type, scCancerct.agg$source)
+
+se.agg = AggregateExpression(se, group.by = c("source", "interface"), assays = "Spatial", return.seurat = TRUE)
+se.agg$source = sapply(strsplit(colnames(se.agg), "_"), `[`, 1)
+se.agg$interface = sapply(strsplit(colnames(se.agg), "_"), `[`, 2)
+se.agg@assays$RNA = se.agg@assays$Spatial
+DefaultAssay(se.agg) = 'RNA'
+se.agg = filter_mt_rb_genes(se.agg)
+se.agg = NormalizeData(se.agg)
+se.agg$origin = 'mmint'
+se.agg$cell_type =se.agg$interface
+se.agg$name = paste(se.agg$source, se.agg$interface)
+de.markers = FindAllMarkers(se.agg, group.by = 'source', assay = 'RNA')
+top10_se = de.markers %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(wt = -p_val_adj, n = 10) %>%
+  dplyr::top_n(wt = avg_log2FC, n = 10)
+
+
+
+se.merged = merge(x = se.agg, y = c(normal.refct.agg, scCancerct.agg))
+se.merged = JoinLayers(se.merged)
+se.merged = ScaleData(se.merged)
+se.merged = FindVariableFeatures(se.merged, nfeatures = 7500)
+se.merged = RunPCA(se.merged, npcs = 50)
+se.merged = RunUMAP(se.merged, dims = 1:50)
+
+se.merged.int = se.merged
+se.merged.int[["RNA"]] <- split(se.merged[["RNA"]], f = se.merged$origin)
+se.merged.int <- NormalizeData(se.merged.int)
+se.merged.int <- FindVariableFeatures(se.merged.int)
+se.merged.int <- ScaleData(se.merged.int)
+se.merged.int <- RunPCA(se.merged.int)
+
+se.merged.int <- FindNeighbors(se.merged.int, dims = 1:30, reduction = "pca")
+se.merged.int <- FindClusters(se.merged.int, resolution = 2, cluster.name = "unintegrated_clusters")
+se.merged.int <- RunUMAP(se.merged.int, dims = 1:30, reduction = "pca", reduction.name = "umap.unintegrated")
+DimPlot(se.merged.int, reduction = "umap.unintegrated", group.by = c("origin", "cell_type"))
+
+se.merged.int <- IntegrateLayers(
+  object = se.merged.int, method = HarmonyIntegration,
+  orig.reduction = "pca", new.reduction = "integrated.harmony",
+  verbose = TRUE
+)
+
+se.merged.int <- FindNeighbors(se.merged.int, reduction = "integrated.harmony", dims = 1:30)
+se.merged.int <- FindClusters(se.merged.int, resolution = 2, cluster.name = "harmony_clusters")
+se.merged.int <- RunUMAP(se.merged.int, reduction = "integrated.harmony", dims = 1:30, reduction.name = "umap.harmony")
+p1 <- DimPlot(
+  se.merged.int,
+  reduction = "umap.harmony",
+  group.by = c("origin", "cell_type", "source"),
+  combine = TRUE, label.size = 2
+)
+
+p1
+
+p1 <- FeaturePlot(
+  se.merged.int,
+  reduction = "umap.harmony", features = top10_se$gene,
+  combine = TRUE, label.size = 2
+)
+p1
+```
+```{r, fig.height=25}
+DotPlot(se.merged.int, assay = 'RNA', features = top10_se$gene, colors_37 <- c(
+  "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+  "#393b79", "#ff9896", "#98df8a", "#ffbb78", "#c5b0d5", "#8c6d31", "#e7ba52", "#17becf", "#9edae5", "#dbdb8d",
+  "#f7b6d2", "#c49c94", "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5", "#8c6d31", "#e7ba52", "#17becf",
+  "#9edae5", "#dbdb8d", "#f7b6d2", "#c49c94", "#aec7e8", "#ffbb78", "#98df8a"
+), dot.scale = 8, split.by = "source") +
+    RotatedAxis()
+
+DimPlot(se.merged, group.by = c('origin', 'cell_type')) 
+DimPlot(se.merged, group.by = c('origin', 'cell_type'), reduction = 'pca') 
+p1
+
+```
+As the metastases tend to be very uniform, we perform a pseudobulking on Tumor, Interface and Stroma regions as identified by SpaCET
 ```{r decoupleR functions}
 # takes in net (source and target from the database) and returns the se adapted assay
 run_decoupler = function(se,
                          net,
+                         model = 'ulm',
                          .source = 'source',
                          .target = 'target',
                          .mor = 'weight',
@@ -122,10 +358,12 @@ run_decoupler = function(se,
                          batch_kw = c(),
                          pvalue_filter = FALSE,
                          p_all = FALSE,
+                         p_cutoff=0.05,
                          minsize = 5) {
-  model = 'ulm'
+
   acts = c()
   assay_name = paste0(model, '_', store_as)
+  print(assay_name)
   
   net = net %>%
     mutate(across(.source, str_replace_all, '_', '-'))
@@ -135,18 +373,23 @@ run_decoupler = function(se,
     se$batch = 'all'
     batch_kw = 'batch'
   }
+  # print(unique(se[[batch_kw]]))
+  DefaultAssay(se) = assay
   for (source in as.matrix(unique(se[[batch_kw]]))) {
+    gc()
     print(paste('Processing patient sample:', source))
     se.partial = se[, se[[batch_kw]] == source]
-    print(se.partial)
+    # print(se.partial)
     
     if (assay == 'Spatial') {
       mat = as.matrix(se.partial@assays[[assay]]$data)
     } else {
       mat = as.matrix(se.partial@assays[[assay]]$data)
     }
-    print(mat[1:5, 1:5])
+    # print(mat[1:5, 1:5])
     
+    
+    if (model == 'ulm'){
     if (.mor != '') {
       acts_source = run_ulm(
         mat = mat,
@@ -164,6 +407,39 @@ run_decoupler = function(se,
         .target = .target,
         minsize = minsize,
       )
+    }} else if (model == 'mlm'){
+      if (.mor != '') {
+      acts_source = run_mlm(
+        mat = mat,
+        net = net,
+        .source = .source,
+        .target = .target,
+        .mor = .mor,
+        minsize = minsize,
+      )
+      
+      
+      } 
+      else {
+      acts_source = run_mlm(
+        mat = mat,
+        net = net,
+        .source = .source,
+        .target = .target,
+        minsize = minsize,
+      )
+    }
+    } else if (model=='consensus') {
+            acts_source = decouple(
+        mat = mat,
+        net = net,
+        minsize = minsize,
+        statistics = c('ulm', 'mlm')
+        
+      )
+            acts_source = run_consensus(acts_source)
+    } else {
+      print('The model is not implemented yet')
     }
     
     acts = rbind(acts, acts_source)
@@ -173,9 +449,14 @@ run_decoupler = function(se,
   
   if (pvalue_filter == TRUE){ # modify it so it removes anything above 0.05
     if (p_all == FALSE){
-      sig_acts = unique(acts[acts['p_value_adj'] <= 0.05, ][['source']])
+      sig_acts = unique(acts[acts['p_value_adj'] <= p_cutoff, ][['source']])
     } else{
-      sig_acts = setdiff(unique(acts[['source']]), unique(acts[acts['p_value_adj'] > 0.05, ][['source']]))
+      sig_acts = setdiff(unique(acts[['source']]), unique(acts[acts['p_value_adj'] > p_cutoff, ][['source']]))
+      if (length(sig_acts) == 0 ){
+        print(sig_acts)
+        print('No results')
+        break
+      }
     }
     acts = acts[acts[['source']] %in% sig_acts, ]
   }
@@ -196,8 +477,8 @@ run_decoupler = function(se,
                 names_from = 'condition',
                 values_from = 'p_value_adj') %>%
     column_to_rownames('source')
-  print('pvals')
-  print(p_vals[1:5, 1:5])
+  # print('pvals')
+  # print(p_vals[1:5, 1:5])
   
   se[[assay_name]]@misc$pvals = p_vals[rownames(se[[assay_name]]),]
   
@@ -205,6 +486,7 @@ run_decoupler = function(se,
 
   
   se[[assay_name]]@misc$acts_long = acts
+  print(se[[assay_name]])
   # Change assay
   DefaultAssay(object = se) = assay_name
   
@@ -457,6 +739,7 @@ plot_results = function(assay = 'ulm_progeny',
 
 plot_heatmap = function(se,
                         assay,
+                        donor,
                         star = TRUE,
                         verbose = TRUE) {
   dir.create(output_folder,
@@ -476,12 +759,15 @@ plot_heatmap = function(se,
     pathways = names(pth_ranges)[1:max_path]
     n_paths = max_path
     if (verbose == TRUE) {
-      print(pth_ranges)
+      # print(pth_ranges)
     }
   } else{
     pathways = pathways
   }
   
+  
+  se$source = gsub('-', '_', se$source) # because we have issues with dashes?
+  print(se$source)
   df <- t(as.matrix(se@assays[[assay]]@data[pathways, ])) %>%
     as.data.frame() %>%
     mutate(tissue = se$interface) %>%
@@ -517,6 +803,7 @@ plot_heatmap = function(se,
   
   ### Prepare the pvalues
   act_areas = unique(paste0(se$interface, '_',  se$source))
+  act_areas = Idents(se)
   df_p = t(as.matrix(se@assays[[assay]]@misc$pvals[pathways, ]))[act_areas, ]
   df_p = df_p %>%
     as.data.frame() %>%
@@ -566,18 +853,21 @@ plot_heatmap = function(se,
   tissue = tissue[c(unique(se$interface))]
   annoCol = list(tissue = tissue)
   
-  donor = c(
-    'P1' = 'darkorchid3',
-    'P2' = 'yellow4',
-    'P3' = 'pink3',
-    'P4' = 'dodgerblue4'
-  )
+
+  # print('this is the donor palette')
+  # print(donor)
+  # print('se.source')
+  # print(c(unique(se$source)))
   donor = donor[c(unique(se$source))]
   annoCol = append(list(donor = donor), annoCol)
-  
+  # print('this is the donor list')
+  # print(unique(annotation.df$donor))
   
   annoCol = append(list(tissue = annoCol$tissue[unique(annotation.df$tissue)]),
                    c(list(donor = annoCol$donor[unique(annotation.df$donor)])))
+  
+  # print(annotation.df[1:5, ])
+  # print(annoCol)
   
   if (star == TRUE){
       pph = pheatmap(
@@ -607,112 +897,978 @@ plot_heatmap = function(se,
   return(pph)
   
 }
+
+plot_heatmap_ct = function(se,
+                        assay,
+                        donor,
+                        cell_type,
+                        star = TRUE,
+                        verbose = TRUE) {
+  dir.create(output_folder,
+             recursive = TRUE,
+             showWarnings = FALSE)
+  pathways = rownames(se@assays[[assay]]@data)
+  max_path = 10000
+  if (length(pathways) > max_path) {
+    print(paste(
+      'Selecting top',
+      max_path,
+      'features out of',
+      length(pathways)
+    ))
+    pth_ranges = apply(se@assays[[assay]]@data, 1, max) - apply(se@assays[[assay]]@data, 1, min)
+    pth_ranges = pth_ranges[order(pth_ranges, decreasing = TRUE)]
+    pathways = names(pth_ranges)[1:max_path]
+    n_paths = max_path
+    if (verbose == TRUE) {
+      # print(pth_ranges)
+    }
+  } else{
+    pathways = pathways
+  }
+  
+  
+  se$source = gsub('-', '_', se$source)
+  se$cell_type = gsub('-', '_', se$cell_type)
+  names(cell_type) = gsub('-', '_', names(cell_type))
+  donor = gsub('-', '_', donor)# because we have issues with dashes?
+  # print(se$source)
+  df <- t(as.matrix(se@assays[[assay]]@data[pathways, ])) %>%
+    as.data.frame() %>%
+    mutate(tissue = se$interface) %>%
+    mutate(donor = se$source) %>%
+    mutate(cell_type = se$cell_type) %>%
+    pivot_longer(
+      cols = !c(donor, tissue, cell_type),
+      names_to = "source",
+      values_to = "score"
+    ) %>%
+    group_by(donor, tissue, cell_type, source) %>%
+    summarise(mean = mean(score))
+  
+  # Transform to wide matrix
+  
+  top_acts_mat = df %>%
+    pivot_wider(
+      id_cols = c('donor', 'tissue', 'cell_type'),
+      names_from = 'source',
+      values_from = 'mean'
+    )
+  cnames = paste0(top_acts_mat$donor, '_', top_acts_mat$tissue, '_', top_acts_mat$cell_type)
+  
+  annotation.df = as.data.frame(top_acts_mat[, c('donor', 'tissue', 'cell_type')])
+  annotation.df[sapply(annotation.df, is.character)] = lapply(annotation.df[sapply(annotation.df, is.character)],
+                                                              as.factor)
+  
+  top_acts_mat$donor = NULL
+  top_acts_mat$tissue = NULL
+  top_acts_mat$cell_type = NULL
+  
+  top_acts_mat = t(top_acts_mat)
+  colnames(top_acts_mat) = cnames
+  rownames(annotation.df) = colnames(top_acts_mat)
+  
+  ### Prepare the pvalues
+  act_areas = unique(paste0(se$interface, '_',  se$source, '_', se$cell_type))
+  act_areas = Idents(se)
+  df_p = t(as.matrix(se@assays[[assay]]@misc$pvals[pathways, ]))[act_areas, ]
+  df_p = df_p %>%
+    as.data.frame() %>%
+    mutate(tissue = se$interface) %>%
+    mutate(donor = se$source) %>%
+    mutate(cell_type = se$cell_type)  %>%
+    pivot_longer(
+      cols = !c(donor, tissue, cell_type),
+      names_to = "source",
+      values_to = "score"
+    ) %>%
+    group_by(donor, tissue, cell_type, source) %>%
+    summarise(p_value = mean(score))
+  
+  df_p$stars = cut(
+    df_p$p_value,
+    breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+    label = c("***", "**", "*", "")
+  )
+  print(df_p$stars)
+  top_acts_mat_star <- df_p %>%
+    pivot_wider(
+      id_cols = c('donor', 'tissue', 'cell_type'),
+      names_from = 'source',
+      values_from = 'stars'
+    )
+  top_acts_mat_star$donor = NULL
+  top_acts_mat_star$tissue = NULL
+  top_acts_mat_star$cell_type = NULL
+  
+  top_acts_mat_star = t(top_acts_mat_star)
+  colnames(top_acts_mat_star) = cnames # and now you have the pvalues
+
+  # Choose color palette
+  palette_length = 100
+  my_color = colorRampPalette(c("Darkblue", "white", "red"))(palette_length)
+  
+  my_breaks <-
+    c(seq(-2, 0, length.out = ceiling(palette_length / 2) + 1),
+      seq(0.05, 2, length.out = floor(palette_length / 2)))
+  
+  # create the color palette
+  tissue = c(
+    Stroma = "darkgrey",
+    Interface = "black",
+    Tumor = "gold1"
+  )
+  tissue = tissue[c(unique(se$interface))]
+  donor = donor[c(unique(se$source))]
+  cell_type = cell_type[c(unique(se$cell_type))]
+  annoCol = list(tissue = tissue)
+  annoCol = append(list(donor = donor), annoCol)
+  annoCol = append(list(cell_type = cell_type), annoCol)
+
+  # print('this is the donor palette')
+  # print(donor)
+  # print('se.source')
+  # print(c(unique(se$source)))
+  
+  
+  # print('this is the donor list')
+  # print(unique(annotation.df$donor))
+  
+
+  
+  annoCol = append(list(tissue = annoCol$tissue[unique(annotation.df$tissue)]),
+                   c(list(donor = annoCol$donor[unique(annotation.df$donor)]), 
+                     list(cell_type = annoCol$cell_type[unique(annotation.df$cell_type)])))
+  
+  print(annoCol)
+  print(annotation.df)
+  
+
+  
+  # print(annotation.df[1:5, ])
+  # print(annoCol)
+  
+  if (star == TRUE){
+      pph = pheatmap(
+    top_acts_mat,
+    annotation_col = annotation.df,
+    annotation_colors = annoCol,
+    border_color = NA,
+    color = my_color,
+    breaks = my_breaks,
+    fontsize = 7,
+    display_numbers = top_acts_mat_star
+    # cluster_cols = FALSE
+  )
+  } else {
+      pph = pheatmap(
+    top_acts_mat,
+    annotation_col = annotation.df,
+    annotation_colors = annoCol,
+    border_color = NA,
+    color = my_color,
+    breaks = my_breaks,
+    fontsize = 3,
+
+  )
+  }
+
+  return(pph)
+  
+}
+
+
+comp_corr = function(se,
+                     assay,
+                     cutoff = 0.5,
+                     split_by = 'source',
+                     method = 'spearman',
+                     output_folder = '/home/rstudio/mod/results/decoupler/correlations/') {
+  dir.create(output_folder, showWarnings = FALSE)
+  
+  maxl = 0
+  for (i in rownames(se@assays[[assay]]@data)){if (nchar(i)>maxl){maxl = nchar(i)}}
+  print(maxl)
+  
+  for (var in unique(se[[split_by]][, ]))  {
+    print(var)
+    correlation_matrix = data.frame(matrix(nrow = 0, ncol = length(ct_main)))
+    colnames(correlation_matrix) = ct_main
+    pval_matrix = correlation_matrix
+    
+    se_part = se[, se[[split_by]] == var]
+    
+    # subselect the acts_long on the adjusted p_value
+    Ppt = se_part@assays[[assay]]@misc[["acts_long"]]
+    Ppt = Ppt[Ppt$condition%in%colnames(se_part), ]
+    Ppt = Ppt[Ppt$p_value_adj < 0.05, ]
+    pth_passed = table(Ppt$source) > (dim(se_part)[2]*cutoff)
+    pth_passed = names(pth_passed[pth_passed == TRUE])
+    print(table(Ppt$source))
+    print(length(pth_passed))
+    
+    Apt = se_part@assays[[assay]]@data[pth_passed, ]
+    Act = se_part@reductions$SpaCET[ct_main, colnames(se_part)]
+    
+    for (pth in pth_passed){
+      print(pth)
+      features = Ppt[Ppt$source==pth, ]$condition
+      
+      print(SpatialFeaturePlot(se[, features], features = c(pth)))
+
+      Apt_pth = Apt[pth , features]
+      result = rcorr(t(Act[, features]),
+                     (Apt[pth , features]), 
+                     type = method)
+      correlation_matrix[pth, ] = result$r['y', ct_main]
+      pval_matrix[pth, ] = result$P['y', ct_main] 
+      
+    }
+    
+    pval_stars <- apply(pval_matrix, c(1, 2), function(x) {
+      if (is.na(x)) {
+        return(NA) # Keep NA as it is
+      } else if (x < 0.001) {
+        return("***")
+      } else if (x < 0.01) {
+        return("**")
+      } else if (x < 0.05) {
+        return("*")
+      } else {
+        return("") # No significance
+      }
+    })
+    # decoupleR vs ct
+
+    s = pheatmap(correlation_matrix, display_numbers = pval_stars, fontsize = 12)
+    width = 0.5 * length(ct_main) + 0.1*maxl
+    height = 0.5 * length(pth_passed) + 0.1*maxl
+    print(width)
+    print(height)
+    print('THIS WAS W AND HEIGHT')
+    
+    pdf(
+      paste0(
+        output_folder,
+        assay,
+        '_',
+        var,
+        '_corr_ct_assay_pheatmap_padj.pdf'
+      ),
+      height = 0.5 * length(rownames(Apt)) + 0.1*maxl,
+      width = 0.5 * length(rownames(Act)) + 0.1*maxl)
+    print(s)
+    dev.off()
+
+  }
+}
+
+
+pheatmap_merged = function(assay_name,
+                           se.agg,
+                           scCancerct.agg,
+                           normal.refct.agg,
+                           cluster_cols = TRUE,
+                           cluster_rows = TRUE) {
+  mmint_passed = grepl("Tumor|Stroma", colnames(se.agg))
+  mat = se.agg@assays[[assay_name]]$data
+  colnames(mat) = paste(se.agg$interface, se.agg$source)
+  mat = mat[, mmint_passed]
+  pval = se.agg@assays[[assay_name]]@misc$pvals[, mmint_passed]
+  
+  cancer_passed = grepl("Tumor cells|CAFs", colnames(scCancerct.agg))
+  mat_add = scCancerct.agg@assays[[assay_name]]$data
+  colnames(mat_add) = scCancerct.agg$name
+  mat_add = mat_add[, cancer_passed]
+  
+  common = intersect(rownames(mat), rownames(mat_add))
+  mat = cbind(mat[common, ], mat_add[common, sort(colnames(mat_add))])
+  
+  pval_add = scCancerct.agg@assays[[assay_name]]@misc$pvals
+  colnames(pval_add) = scCancerct.agg$name
+  pval_add = pval_add[, cancer_passed]
+  pval = cbind(pval[common, ], pval_add[common, sort(colnames(pval_add))])
+  
+  normal_passed = grepl("mel", colnames(normal.refct.agg), ignore.case = TRUE)
+  normal.refct.agg$name = gsub('mel', 'Melanocytes', normal.refct.agg$name)
+  normal.refct.agg$name = gsub('cyc-Melanocytes',
+                               'Cycling Melanocytes',
+                               normal.refct.agg$name)
+  mat_add = normal.refct.agg@assays[[assay_name]]$data
+  colnames(mat_add) = normal.refct.agg$name
+  mat_add = mat_add[, normal_passed]
+  
+  common = intersect(rownames(mat), rownames(mat_add))
+  mat = cbind(mat[common, ], mat_add[common, sort(colnames(mat_add))])
+  
+  pval_add = normal.refct.agg@assays[[assay_name]]@misc$pvals
+  colnames(pval_add) = normal.refct.agg$name
+  pval_add = pval_add[, normal_passed]
+  pval = cbind(pval[common, ], pval_add[common, sort(colnames(pval_add))])
+  
+  pval_stars = apply(pval, c(1, 2), function(x) {
+    cut(
+      x,
+      breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+      labels = c("***", "**", "*", "")
+    )
+  })
+  
+  palette_length = 100
+  my_color = colorRampPalette(c("darkblue", "white", "red"))(palette_length)
+  
+  my_breaks <-
+    c(seq(-2, 0, length.out = ceiling(palette_length / 2) + 1),
+      seq(0.05, 2, length.out = floor(palette_length / 2)))
+  my_colour = list(
+    sources = donor_palette[names(donor_palette) %in% anno.df$sources],
+    cell_types = c(
+      CAFs = "#6A3D9A",
+      Cycling_Melanocytes = "palegreen4",
+      Melanocytes = "palegreen",
+      Stroma = 'darkgrey',
+      Tumor = 'gold1',
+      Tumor_cells = 'lemonchiffon'
+    )
+  )
+  
+  split_entry <- function(entry) {
+    # Split at the last space
+    parts = strsplit(entry, " ")[[1]]
+    cell_type = paste(parts[-length(parts)], collapse = " ")
+    sources = parts[length(parts)]
+    return(list(cell_type = cell_type, sources = sources))
+  }
+  split_list = lapply(colnames(mat), split_entry)
+  cell_types = sapply(split_list, function(x)
+    x$cell_type)
+  cell_types = gsub(' ', '_', cell_types)
+  sources = sapply(split_list, function(x)
+    x$source)
+  sources = gsub('-', '_', sources)
+  anno.df = data.frame(row.names = colnames(mat), cell_types, sources)
+  
+  pph = pheatmap(
+    mat,
+    cluster_cols = cluster_cols,
+    cluster_rows = cluster_rows,
+    display_numbers = pval_stars,
+    color = my_color,
+    fontsize = 12,
+    breaks = my_breaks,
+    annotation_col = anno.df,
+    annotation_colors = my_colour
+  )
+  pph
+  return(pph)
+}
+
+get_gene_pheatmap = function(se_list, genes, donor_palette){
+
+  data = data.frame(row.names = genes)
+  cell_types = c()
+  sources = c()
+  MITF = c()
+  
+  for (se in se_list){
+  DefaultAssay(se) = 'RNA'
+  se.part = se[genes, ] 
+  cell_types = c(cell_types, as.character(se.part$cell_type))
+  # MITF = c(MITF, se@assays$ulm_collecttri_TF_aggregate@data['MITF', ])
+  sources = c(sources, se.part$source)
+  genes = rownames(se.part)
+  data_add = as.matrix(se.part@assays$RNA@layers$data)
+  colnames(data_add) = colnames(se.part)
+  rownames(data_add) = rownames(se.part)
+  data = cbind(data[genes, ], data_add[genes, ])
+  }
+  
+  # MITF = t(data.frame(MITF))
+  # data = rbind( data, MITF)
+  print(data)
+  cell_types = gsub('mel', 'Melanocytes', cell_types)
+  cell_types = gsub('cyc-Melanocytes', 'Cycling Melanocytes', cell_types)
+  sources = gsub('-', '_', sources)
+cell_types <- gsub("[/ -]", "_", cell_types)
+colnames(data) = gsub('_', ' ', colnames(data))
+print(table(cell_types))
+
+  
+  palette_length = 100
+  my_color = colorRampPalette(c("darkblue", "white", "red"))(palette_length)
+  cell_palette = c(
+      CAFs = "#6A3D9A",
+      Cycling_Melanocytes = "palegreen4",
+      Melanocytes = "palegreen",
+      Stroma = 'darkgrey',
+      Tumor = 'gold1',
+      Tumor_cells = 'lemonchiffon',
+  cyc_krt = 'orangered3',      # Light salmon for cycling keratinocytes (more distinct)
+  dendritic = '#1F78B4',    # Light blue for dendritic cells (closer to immune cells)
+  eccrine = 'pink',      # Dark brown for eccrine (epithelial-related)
+  krt = 'orangered2',          # OrangeRed for keratinocytes (distinct from melanocytes)
+  mast = '#FF990F',         # Indian red for mast cells (myeloid-related)
+  T_cell = 'blue',       # Lime green for T-cells
+  B_Plasma_cells = '#4169E1', # Royal blue for B/Plasma cells
+  CNS_cells = 'purple',    # Dark orchid for CNS cells
+  Endothelial_cells = '#FF69B4', # Hot pink for endothelial cells
+  Myeloid_cells = '#20B2AA', # Indian red for myeloid cells
+  Stromal_cells = 'indianred', # Light sea green for stromal cells
+  T_NK_cells = 'lightblue4'   # Forest green for T/NK cells
+    )
+  print(names(cell_palette))
+  
+    my_breaks <-
+    c(seq(-2, 0, length.out = ceiling(palette_length / 2) + 1),
+      seq(0.05, 2, length.out = floor(palette_length / 2)))
+  my_colour = list(
+    sources = donor_palette[names(donor_palette) %in% sources],
+    cell_types = cell_palette[names(cell_palette)%in% cell_types]
+  )
+  anno.df = data.frame(row.names = colnames(data), cell_types, sources)
+ pph = pheatmap(data, cluster_cols = TRUE, color = my_color, annotation_col = anno.df, 
+    annotation_colors = my_colour)
+  
+  return(pph)
+}
+
+get_count_data = function(se, assay){mat = as.data.frame(se@assays[[assay]]@layers$counts); colnames(mat) = colnames(se@assays[[assay]]); rownames(mat) = rownames(se@assays[[assay]]); return(mat)}
 ```
 
-```{r progeny, fig.height=15, fig.width=15, warning=FALSE, paged.print=TRUE}
-se = se.agg
+```{r deseq, fig.height=10}
+library(DESeq2)
+library(sva)
+
+normal.refct.agg.red = normal.refct.agg[, normal.refct.agg$cell_type%in%c('mel', 'cyc-mel', 'krt')]
+scCancer.agg$cell_type = scCancer.agg$interface
+scCancer.agg$cell_type = gsub('Tumor', 'Tumor cells', scCancer.agg$cell_type)
+pass.cancer = names(table(scCancer.agg$source)[table(scCancer.agg$source) > 1]) 
+scCancer.agg.red = scCancer.agg[, scCancer.agg$source%in%pass.cancer]
+
+# Create a merged count matrix from the selected datasets
+counts = merge(get_count_data(scCancerct.agg, assay='RNA'), get_count_data(se.agg, assay='Spatial'), by=0) 
+row.names(counts) = counts$Row.names
+counts$Row.names = NULL
+counts = merge(counts, get_count_data(normal.refct.agg, assay='RNA'), by=0)
+row.names(counts) = counts$Row.names
+counts$Row.names = NULL
+counts = as.matrix(counts)
+
+# create the associated metadata
+coldata = data.frame(Sample = colnames(counts))
+coldata$dataset = c(scCancerct.agg$origin, se.agg$origin, normal.refct.agg$origin)
+coldata$cell_type = c(scCancerct.agg$cell_type, se.agg$cell_type, normal.refct.agg$cell_type)
+coldata$source = c(scCancerct.agg$source, se.agg$source, normal.refct.agg$source)
+coldata$interface = c(scCancerct.agg$interface, se.agg$interface, normal.refct.agg$interface)
+
+dds <- DESeqDataSetFromMatrix(countData = counts, colData = coldata, design = ~ 1)
+dds <- estimateSizeFactors(dds)
+norm_counts <- counts(dds, normalized = TRUE)
+
+
+adjusted_counts <- ComBat_seq(counts, batch = coldata$dataset)
+
+log_adj <- log2(adjusted_counts + 1)
+pca <- prcomp(t(log_adj), scale. = TRUE)
+ggplot(as.data.frame(pca$x), aes(PC1, PC2, color = coldata$cell_type, shape = coldata$dataset)) +
+  geom_point(size = 3)
+
+row.names(coldata) = coldata$Sample
+dds.se = CreateSeuratObject(adjusted_counts, meta.data = coldata)
+dds.se = NormalizeData(dds.se)
+dds.se = ScaleData(dds.se)
+dds.se = FindVariableFeatures(dds.se)
+dds.se = RunPCA(dds.se)
+dds.se = RunUMAP(dds.se, dims = 1:50)
+
+# control plots
+genes = c('PMEL', 'MLANA', 'DCT',  'MITF', 'AXL', 'ZEB1', 'TWIST1', 'TYR', 'TYRP1', 'MC1R')
+
+DimPlot(dds.se, group.by = c('dataset', 'cell_type', 'interface'))
+pph = get_gene_pheatmap(c(dds.se[, dds.se$cell_type%in%c('mel', 'cyc-mel', 'Tumor', 'Stroma', 'Tumor cells', 'CAFs')]), 
+                        genes, 
+                        donor_palette = donor_palette )
+FeaturePlot(dds.se, features = genes)
+DimPlot(dds.se, group.by = c('interface', 'cell_type'))
+SpatialFeaturePlot(se, features = genes[1], ncol = 4, image.alpha = 0)
+SpatialFeaturePlot(se, features = genes[2], ncol = 4, image.alpha = 0)
+SpatialFeaturePlot(se, features = genes[3], ncol = 4, image.alpha = 0)
+SpatialFeaturePlot(se, features = genes[4], ncol = 4, image.alpha = 0)
+
+# save the resulting figure
+pdf('./mod/results/decoupler/mitf_associated_genes.pdf', height = 4, width = 12)
+print(pph)
+dev.off()
+
+```
+
+```{r palettes}
+  donor_palette = c(
+    'P1' = 'darkorchid3',
+    'P2' = 'yellow4',
+    'P3' = 'pink3',
+    'P4' = 'dodgerblue4',
+  # First group (blue/green shades)
+  'A1011L' = 'turquoise3',
+  'A1012M' = 'cadetblue3',
+  'A1014L' = 'steelblue3',
+  'A1015LM' = 'aquamarine3',
+  'A1016LM' = 'darkslategray3',
+  'A1017LM' = 'paleturquoise3',
+  'A1020LM' = 'lightseagreen',
+  'A1021M' = 'deepskyblue3',
+  'A1022M' = 'mediumturquoise',
+  'A1025L' = 'darkturquoise',
+  'A1026L' = 'powderblue',
+  'A1033M' = 'skyblue3',
+  'A1038LM' = 'lightskyblue3',
+  'A1046M' = 'cornflowerblue',
+  'FS030_LM' = 'darkseagreen3',
+  'FS043_LM' = 'mediumaquamarine',
+  # Second group (red/orange shades)
+'MBM05_sn' = 'indianred1',
+  'MBM06_sn' = 'firebrick3',
+  'MBM07_sn' = 'tomato3',
+  'MBM08_sn' = 'coral3',
+  'MBM09_sn' = 'salmon3',
+  'MBM10_sn' = 'darkorange3',
+  'MBM11_sn' = 'sienna3',
+  'MBM12_sn' = 'chocolate3',
+  'MBM13_sn' = 'peru',
+  'MBM14_sn' = 'darkgoldenrod3',
+  'MBM15_sn' = 'tan3',
+  'MBM16_sn' = 'rosybrown3',
+  'MBM17_sn' = 'lightcoral',
+  'MBM18_sn' = 'orangered3',
+  'MBM19_sn' = 'brown3',
+  'MBM20_sn' = 'maroon3',
+  'MBM21_sn' = 'violetred3'
+)
+
+scRNA_ct_palette = c(
+  'CAFs' = "#6A3D9A",
+  'cyc_krt' = 'orangered3',      # Light salmon for cycling keratinocytes (more distinct)
+  'cyc_mel' = 'brown4',      # Tomato for cycling melanocytes (closer to tumor)
+  'dendritic' = '#1F78B4',    # Light blue for dendritic cells (closer to immune cells)
+  'eccrine' = 'lightblue',      # Dark brown for eccrine (epithelial-related)
+  'krt' = 'orangered2',          # OrangeRed for keratinocytes (distinct from melanocytes)
+  'mast' = '#FF990F',         # Indian red for mast cells (myeloid-related)
+  'mel' = 'brown',          # Dark orange for melanocytes (closer to tumor cells)
+  'T-cell' = '#32CD32',       # Lime green for T-cells
+  'B/Plasma cells' = '#4169E1', # Royal blue for B/Plasma cells
+  'CNS cells' = 'blue',    # Dark orchid for CNS cells
+  'Endothelial cells' = '#FF69B4', # Hot pink for endothelial cells
+  'Myeloid cells' = '#CD5C5C', # Indian red for myeloid cells
+  'Stromal cells' = '#20B2AA', # Light sea green for stromal cells
+  'T/NK cells' = '#228B22',   # Forest green for T/NK cells
+  'Tumor cells' = '#FFD700',
+  'Stroma' = 'darkgrey',
+  'Tumor' = 'gold1'
+)
+
+```
+
+```{r progeny, fig.height=8, warning=FALSE, paged.print=TRUE}
 net = get_progeny(organism = 'human', top = 100) # 100 genes from the human database
 
 assay = 'progeny_aggregate'
-assay_name = paste0('ulm_', assay) # ulm is the default in all of these
+model = 'ulm'
+assay_name = paste0(model, '_', assay) # ulm is the default in all of these
 output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+
+
+# cancer ref cell type
+scCancerct.agg = run_decoupler(
+  se = scCancerct.agg,
+  model = model,
+  net = net,
+  assay = 'RNA',
+  store_as = assay,
+  minsize = 5,
+  pvalue_filter = FALSE,
+  p_all = FALSE,
+)
+pph = plot_heatmap_ct(scCancerct.agg,
+                   assay = assay_name,
+                   cell_type = scRNA_ct_palette,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_cancer_ref_ct_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# cancer  pseudobulk
+scCancer.agg = run_decoupler(
+  se = scCancer.agg,
+  model = model,
+  net = net,
+  assay = 'RNA',
+  store_as = assay,
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap(scCancer.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_cancer_ref_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# normal ref cell types
+normal.refct.agg = run_decoupler(
+  se = normal.refct.agg,
+  model = model,
+  net = net,
+  assay = 'RNA',
+  store_as = assay,
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap_ct(normal.refct.agg,
+                   assay = assay_name,
+                   cell_type = scRNA_ct_palette,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_normal_ref_ct_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# normal ref
+normal.ref.agg = run_decoupler(
+  se = normal.ref.agg,
+  model = model,
+  net = net,
+  assay = 'RNA',
+  store_as = assay,
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap(normal.ref.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_normal_ref_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# mmint dataset
+se.agg = run_decoupler(
+  se = se.agg,
+  model = model,
+  net = net,
+  assay = 'Spatial',
+  store_as = assay,
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap(se.agg[, se.agg$interface %in% c('Stroma', 'Tumor')],
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_mmint_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.1* length(pph$tree_row$labels) + 2,
+  width = 0.1* length(pph$tree_col$labels) + 3
+)
+print(pph)
+dev.off()
+```
+```{r, fig.height=20}
+pheatmap_merged(assay_name = assay_name, se.agg=se.agg, scCancerct.agg=scCancerct.agg, normal.refct.agg=normal.refct.agg)
+DefaultAssay(se) = 'Spatial'
+SpatialFeaturePlot(se, features = c('PMEL', 'DCT', 'TYR'), crop = FALSE, pt.size.factor = 2)
+```
+
+```{r, fig.height=10}
+# mmint dataset spatial analysis
+assay = 'progeny'
+model = 'ulm'
+assay_name = paste0(model, '_', assay)
+
+output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+dir.create(output_folder, showWarnings = FALSE)
 
 
 se = run_decoupler(
   se = se,
+  model = 'ulm',
   net = net,
-  assay = 'SCT',
+  assay = 'Spatial',
   store_as = assay,
   minsize = 5,
   pvalue_filter = TRUE,
-  p_all = FALSE
-  # batch_kw = 'interface'
+  p_all = FALSE,
+  batch_kw = 'sample_id'
 )
 
-## comment out for spatial non-pseudobulk version
-# QC_plot(
-#   se,
-#   reduction = 'umap.STACAS',
-#   features = rownames(se),
-#   assay = assay_name,
-#   # demo_slides = c('S2_A1')
-# )
+paths = row.names(se@assays[[assay_name]]@data)
 
-plot_results(
+for (path in 1:length(paths)) {
+  s = SpatialFeaturePlot(
+    se,
+    features = row.names(se@assays[[assay_name]]@data)[path],
+    ncol = 4,
+    pt.size.factor = 2.5,
+    image.alpha = 0,
+    crop = FALSE,
+    combine = TRUE
+  )
+  
+  pdf(
+    paste0(
+      '/home/rstudio/mod/results/decoupler/', assay,'/',
+      assay_name,
+      '_',
+      paths[path],
+      '_mmint_scores_spatial.pdf'
+    ),
+    height = 10,
+    width = 8
+  )
+  print(s)
+  dev.off()
+}
+
+
+for (path in 1:length(paths)) {
+  p_val = se@assays[[assay_name]]@misc$pvals[path, ]<=0.05
+  s = SpatialFeaturePlot(
+    se[, p_val],
+    features = row.names(se@assays[[assay_name]]@data)[path],
+    ncol = 4,
+    pt.size.factor = 2.5,
+    image.alpha = 0,
+    crop = FALSE,
+    combine = TRUE
+  )
+  
+  pdf(
+    paste0(
+      '/home/rstudio/mod/results/decoupler/', assay,'/',
+      assay_name,
+      '_',
+      paths[path],
+      '_mmint_scores_spatial_p005.pdf'
+    ),
+    height = 10,
+    width = 8
+  )
+  print(s)
+  dev.off()
+}
+
+
+comp_corr(
+  se,
   assay = assay_name,
-  folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/'),
-  reduction = 'umap.STACAS'
+  split_by = 'source',
+  method = 'pearson',
+  cutoff = 0.5,
+  output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay,'/correlations/')
 )
-
-scores = se@assays[[assay_name]]@misc$acts_long
-write.table(
-  scores,
-  file = paste0(
-    '/home/rstudio/mod/results/decoupler/',
-    assay,
-    '/scores_',
-    assay_name,
-    '.tsv'
-  ), 
-  sep = '\t',
-  quote = FALSE
-)
-
-
-SpatialDimPlot(se.STACAS, group.by = 'seurat_clusters', ncol = 4)
-se$stacas_clusters = se.STACAS$seurat_clusters
-
-# se$source = gsub('S', 'P', se$source)
-
-pph = plot_heatmap(se,
-                   assay = assay_name)
-pdf(
-  paste0(output_folder, assay, '_scores_pheatmap.pdf'),
-  width = 5,
-  height = 0.4 * length(rownames(se))
-)
-print(pph)
-dev.off()
-
-
-pph = plot_heatmap(se[, se$interface == 'Tumor'],
-                   assay = assay_name)
-pdf(
-  paste0(output_folder, assay, '_scores_pheatmap_Tumor.pdf'),
-  width = 5,
-  height = 0.4 * length(rownames(se))
-)
-print(pph)
-dev.off()
-
 ```
 
 
-```{r fig.height=15, fig.width=15}
+```{r msigdb hallmark analysis, fig.height=15, fig.width=15}
 # net = get_resource('MSigDB', organism = 'human')
 # msigdb_colections = unique(net[, 'collection'])
 # collection = 'hallmark'
 # net = net[net[, 'collection'] == collection, ]
 
-net = msigdbr(
-  species = "human", 
-  category = "H"
-  )
+net = msigdbr(species = "human",
+              category = "H")
 
-net = distinct(
-  net, 
-  diff = paste0(gs_name, human_gene_symbol),
-  .keep_all = TRUE
-  )
+net = distinct(net,
+               diff = paste0(gs_name, human_gene_symbol),
+               .keep_all = TRUE)
+
+net$mor = 1
+net$gs_name = gsub('_', ' ', net$gs_name)
+net$gs_name = gsub('HALLMARK ', '', net$gs_name)
+
 
 assay = 'msigdb_aggregate'
-assay_name = paste0('ulm_', assay) # ulm is the default in all of these
+model = 'ulm'
+assay_name = paste0(model, '_', assay)
 output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
 
-## reuse the mat from before (keep it consistent between methods)
-se = run_decoupler(
-  se = se,
+# cancer ref cell type
+scCancerct.agg = run_decoupler(
+  se = scCancerct.agg,
   net = net, 
+  model = model,
+  .source='gs_name',
+  .target='human_gene_symbol',
+  .mor='',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap_ct(scCancerct.agg,
+                   assay = assay_name,
+                   cell_type = scRNA_ct_palette,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_cancer_ref_ct_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# cancer  pseudobulk
+scCancer.agg = run_decoupler(
+  se = scCancer.agg,
+  net = net,
+  model = model,
+  .source='gs_name',
+  .target='human_gene_symbol',
+  .mor='',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap(scCancer.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_cancer_ref_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# normal ref cell types
+normal.refct.agg = run_decoupler(
+  se = normal.refct.agg,
+  net = net, 
+  model = model,
+  .source='gs_name',
+  .target='human_gene_symbol',
+  .mor='',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap_ct(normal.refct.agg,
+                   assay = assay_name,
+                   cell_type = scRNA_ct_palette,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_normal_ref_ct_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# normal ref
+normal.ref.agg = run_decoupler(
+  se = normal.ref.agg,
+  net = net, 
+  model = model,
+  .source='gs_name',
+  .target='human_gene_symbol',
+  .mor='',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap(normal.ref.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_normal_ref_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# mmint dataset
+se.agg = run_decoupler(
+  se = se.agg,
+  net = net, 
+  model = model,
   .source='gs_name',
   .target='human_gene_symbol',
   .mor='',
@@ -720,192 +1876,517 @@ se = run_decoupler(
   store_as = assay, 
   minsize = 5,
   pvalue_filter = TRUE,
-  p_all = TRUE
-  # batch_kw = 'interface'
+  p_all = FALSE,
 )
+pph = plot_heatmap(se.agg[, se.agg$interface %in% c('Stroma', 'Tumor')],
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
 
-scores = se@assays[[assay_name]]@misc$acts_long
-write.table(
-  scores,
-  file = paste0(
-    '/home/rstudio/mod/results/decoupler/',
-    assay,
-    '/scores_',
+pdf(
+  paste0(
+    output_folder,
     assay_name,
-    '.tsv'
-  ), 
-  sep = '\t',
-  quote = FALSE
+    '_mmint_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.05* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
 )
-
-## comment out for spatial non-pseudobulk version
-#
-# QC_plot(
-#     se, 
-#     reduction='umap.STACAS',
-#     features=rownames(se),
-#     assay = assay_name
-# )
-
-se = RunPCA(
-  se, 
-  assay = assay_name, 
-  npcs = 50, 
-  features = se[[assay_name]]$counts@Dimnames[[1]]
-)
-
-se = FindNeighbors(
-  se,
-  reduction = "pca",
-  do.plot = TRUE,
-  dims = 1:49,
-  k.param = 60,
-  prune.SNN = 1 / 15
-)
-se = FindClusters(
-  se,
-  resolution = 1.0,
-  cluster.name = paste0(assay_name, '.clusters'),
-  algorithm = 4
-)
-
-p2 = DimPlot(
-  se,
-  group.by = c('source'),
-  pt.size = 0.5,
-  alpha = 0.75,
-  reduction = 'umap.STACAS',
-  cols = brew.pal.source
-)
-p3 = DimPlot(
-  se,
-  group.by = c(paste0(assay_name, '.clusters')),
-  pt.size = 0.5,
-  alpha = 0.75,
-  reduction = 'umap.STACAS'
-)
-
-p3 - p2
-
-se = BuildClusterTree(se, features =  se[[assay_name]]$counts@Dimnames[[1]])
-PlotClusterTree(se)
-
-plot_results(
-    assay=assay_name,
-    folder=paste0('/home/rstudio/mod/results/decoupler/', assay, '/'),
-    reduction = 'umap.STACAS'
-)
-
-
-SpatialDimPlot(se.STACAS, group.by = 'seurat_clusters', ncol = 4)
-se$stacas_clusters = se.STACAS$seurat_clusters
-
-# se$source = gsub('S', 'P', se$source)
-
-pph = plot_heatmap(se, 
-             assay = assay_name
-             )
-pdf(paste0(output_folder, assay,'_scores_pheatmap.pdf'),  
-          width = 6, 
-          height = 0.15*length(rownames(se))
-        ) 
-  print(pph)
-  dev.off()
-
-
-pph = plot_heatmap(se[, se$interface == 'Tumor'], 
-             assay = assay_name
-             )
-pdf(paste0(output_folder, assay,'_scores_pheatmap_Tumor.pdf'),  
-          width = 6, 
-          height = 0.15*length(rownames(se))
-        ) 
 print(pph)
 dev.off()
+
+pheatmap_merged(assay_name = assay_name, se.agg=se.agg, scCancerct.agg=scCancerct.agg, normal.refct.agg=normal.refct.agg)
+```
+```{r, fig.height=10}
+assay = 'msigdb'
+assay_name = paste0(model, '_', assay)
+
+output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+dir.create(output_folder, showWarnings = FALSE)
+
+# mmint dataset spatial analysis
+se = run_decoupler(
+  se = se,
+  model = model,
+  net = net,
+  assay = 'Spatial',
+  store_as = assay,
+  .source='gs_name',
+  .target='human_gene_symbol',
+  .mor='',
+  minsize = 5,
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+  batch_kw = 'sample_id'
+)
+paths = row.names(se@assays[[assay_name]]@data)
+
+for (path in 1:length(paths)) {
+  if (path %% 10 == 0 ){ print(paste0(path, '/', length(paths)))}
+  s = SpatialFeaturePlot(
+    se,
+    features = row.names(se@assays[[assay_name]]@data)[path],
+    ncol = 4,
+    pt.size.factor = 2.5,
+    image.alpha = 0,
+    crop = FALSE,
+    combine = TRUE
+  )
+  
+  pdf(
+    paste0(
+      '/home/rstudio/mod/results/decoupler/', assay,'/',
+      assay_name,
+      '_',
+      paths[path],
+      '_mmint_scores_spatial.pdf'
+    ),
+    height = 20,
+    width = 16
+  )
+  print(s)
+  dev.off()
+}
+
+comp_corr(
+  se,
+  assay = assay_name,
+  split_by = 'source',
+  method = 'pearson',
+  output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay,'/correlations/')
+)
 ```
 
 ```{r TF pseudobulk, fig.height=25, fig.width=25}
 net = get_collectri(organism = "human", split_complexes=FALSE)
 
 assay = 'collecttri_TF_aggregate'
-assay_name = paste0('ulm_', assay) # ulm is the default in all of these
+model = 'ulm'
+assay_name = paste0(model, '_', assay) # ulm is the default in all of these
 ## reuse the mat from before (keep it consistent between methods)
 output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+
+# cancer ref cell type
+scCancerct.agg = run_decoupler(
+  se = scCancerct.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap_ct(scCancerct.agg,
+                   assay = assay_name,
+                   cell_type = scRNA_ct_palette,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_cancer_ref_ct_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# cancer  pseudobulk
+scCancer.agg = run_decoupler(
+  se = scCancer.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap(scCancer.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_cancer_ref_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# normal ref cell types
+normal.refct.agg = run_decoupler(
+  se = normal.refct.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap_ct(normal.refct.agg,
+                   assay = assay_name,
+                   cell_type = scRNA_ct_palette,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_normal_ref_ct_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# normal ref
+normal.ref.agg = run_decoupler(
+  se = normal.ref.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = FALSE,
+)
+pph = plot_heatmap(normal.ref.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_normal_ref_scores_pheatmap_merged.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# mmint dataset
+p_cutoff = 0.001
+se.agg = run_decoupler(
+  se = se.agg[, se.agg$interface %in% c('Stroma', 'Tumor')],
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'Spatial', 
+  store_as = assay, 
+  minsize = 5, 
+  p_cutoff = p_cutoff,
+  pvalue_filter = TRUE,
+  p_all = TRUE,
+)
+pph = plot_heatmap(se.agg[, se.agg$interface %in% c('Stroma', 'Tumor')],
+                   assay = assay_name, star = FALSE,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_mmint_scores_pheatmap_merged_pall_', p_cutoff,'_nostar.pdf'
+  ),
+  height = 0.02* length(pph$tree_row$labels) + 4,
+  width = 0.001* length(pph$tree_col$labels) + 3
+)
+print(pph)
+dev.off()
+```
+```{r merged heatmaps generation, fig.height=15}
+output_folder = '/home/rstudio/mod/results/decoupler/'
+# for (assay_name in c('ulm_progeny_aggregate', 'ulm_msigdb_aggregate', 'ulm_collecttri_TF_aggregate')){
+for (assay_name in c('ulm_msigdb_aggregate')){
+
+  pph_clust = pheatmap_merged(assay_name = assay_name, se.agg = se.agg, scCancerct.agg = scCancerct.agg, normal.refct.agg = normal.refct.agg)
+  pph = pheatmap_merged(assay_name = assay_name, se.agg = se.agg, scCancerct.agg = scCancerct.agg, normal.refct.agg = normal.refct.agg, cluster_cols = FALSE)
+  
+    pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_comparison_scores_pheatmap.pdf'
+  ),
+  height = 0.2* length(pph_clust$tree_row$labels) + 4,
+  # height = 20,
+  width = 0.3* length(pph_clust$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_comparison_scores_pheatmap_clustered_col.pdf'
+  ),
+  height = 0.2* length(pph_clust$tree_row$labels) + 4,
+  width = 0.3* length(pph_clust$tree_col$labels) + 4
+)
+print(pph_clust)
+dev.off()
+}
+```
+```{r, fig.height=10}
+# mmint dataset spatial analysis
+assay = 'collecttri_TF'
+model = 'ulm'
+assay_name = paste0(model, '_', assay)
+output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+
+dir.create(output_folder, showWarnings = FALSE)
 
 se = run_decoupler(
   se = se,
   net = net, 
+  model= model,
   .source='source',
   .target='target',
   .mor = 'mor',
-  assay = 'SCT', 
+  assay = 'Spatial', 
   store_as = assay, 
   minsize = 5, 
   pvalue_filter = TRUE,
-  p_all = TRUE
-  # batch_kw = 'sample_id'
+  p_all = FALSE,
+  batch_kw = 'sample_id'
 )
 
-scores = se@assays[[assay_name]]@misc$acts_long
-write.table(
-  scores,
-  file = paste0(
-    '/home/rstudio/mod/results/decoupler/',
-    assay,
-    '/scores_',
-    assay_name,
-    '.tsv'
-  ), 
-  sep = '\t',
-  quote = FALSE
-)
+paths = row.names(se@assays[[assay_name]]@data)[1:50]
 
-## comment out for spatial non-pseudobulk version
-#
-# QC_plot(
-#     se, 
-#     reduction='umap.STACAS',
-#     features=rownames(se),
-#     assay = assay_name
-# )
-
-plot_results(
-    assay=assay_name,
-    folder=paste0('/home/rstudio/mod/results/decoupler/', assay, '/'),
-    reduction = 'umap.STACAS'
-)
-
-scores = se@assays[[assay_name]]
-saveRDS(
-  scores,
-  file=paste0('/home/rstudio/mod/results/decoupler/', assay, '/scores_', assay_name, '.rds')
+for (path in 1:length(paths)) {
+  if (path %% 10 == 0 ){ print(paste0(path, '/', length(paths)))}
+  s = SpatialFeaturePlot(
+    se,
+    features = row.names(se@assays[[assay_name]]@data)[path],
+    ncol = 4,
+    pt.size.factor = 2.5,
+    image.alpha = 0,
+    crop = FALSE,
+    combine = TRUE
   )
-
-se@assays[[assay_name]] = readRDS(paste0('/home/rstudio/mod/results/decoupler/', assay, '/scores_', assay_name, '.rds'))
-
-
-pph = plot_heatmap(se, 
-             assay = assay_name,
-             star = FALSE
-             )
-pdf(paste0(output_folder, assay,'_scores_pheatmap_nostar.pdf'),  
-          width = 3, 
-          height = 0.05*length(rownames(se))
-        ) 
-  print(pph)
+  
+  pdf(
+    paste0(
+      '/home/rstudio/mod/results/decoupler/', assay,'/',
+      assay_name,
+      '_',
+      paths[path],
+      '_mmint_scores_spatial.pdf'
+    ),
+    height = 20,
+    width = 16
+  )
+  print(s)
   dev.off()
+}
 
+comp_corr(
+  se,
+  assay = assay_name,
+  split_by = 'source',
+  method = 'pearson',cutoff = 0.9,
+  output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay,'/correlations/')
+)
+```
 
-pph = plot_heatmap(se[, se$interface == 'Tumor'], 
-             assay = assay_name,
-             star = FALSE
-             )
-pdf(paste0(output_folder, assay,'_scores_pheatmap_Tumor_nostar.pdf'),  
-          width = 2, 
-          height = 0.05*length(rownames(se))
-        ) 
+```{r TF pseudobulk, fig.height=25, fig.width=25}
+net = get_collectri(organism = "human", split_complexes=FALSE)
+
+assay = 'collecttri_TF_aggregate'
+model = 'ulm'
+assay_name = paste0(model, '_', assay) # ulm is the default in all of these
+## reuse the mat from before (keep it consistent between methods)
+output_folder = paste0('/home/rstudio/mod/results/decoupler/', assay, '/')
+
+mat = as.matrix(se.agg@assays[['Spatial']]$data)
+# check_corr(net)
+
+# cancer ref cell type
+scCancerct.agg = run_decoupler(
+  se = scCancerct.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = TRUE,
+)
+pph = plot_heatmap_ct(scCancerct.agg,
+                   assay = assay_name,
+                   cell_type = scRNA_ct_palette,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_cancer_ref_ct_scores_pheatmap_merged_pall.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
 print(pph)
 dev.off()
 
-```
+# cancer  pseudobulk
+scCancer.agg = run_decoupler(
+  se = scCancer.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = TRUE,
+)
+pph = plot_heatmap(scCancer.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
 
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_cancer_ref_scores_pheatmap_merged_pall.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# normal ref cell types
+normal.refct.agg = run_decoupler(
+  se = normal.refct.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = TRUE,
+)
+pph = plot_heatmap_ct(normal.refct.agg,
+                   assay = assay_name,
+                   cell_type = scRNA_ct_palette,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_normal_ref_ct_scores_pheatmap_merged_pall.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# normal ref
+normal.ref.agg = run_decoupler(
+  se = normal.ref.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'RNA', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = TRUE,
+)
+pph = plot_heatmap(normal.ref.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_normal_ref_scores_pheatmap_merged_pall.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+
+# mmint dataset
+se.agg = run_decoupler(
+  se = se.agg,
+  net = net, 
+  model= model,
+  .source='source',
+  .target='target',
+  .mor = 'mor',
+  assay = 'Spatial', 
+  store_as = assay, 
+  minsize = 5, 
+  pvalue_filter = TRUE,
+  p_all = TRUE,
+)
+pph = plot_heatmap(se.agg,
+                   assay = assay_name,
+                   donor = donor_palette)
+print(pph)
+
+pdf(
+  paste0(
+    output_folder,
+    assay_name,
+    '_mmint_scores_pheatmap_merged_pall.pdf'
+  ),
+  height = 0.2* length(pph$tree_row$labels) + 4,
+  width = 0.2* length(pph$tree_col$labels) + 4
+)
+print(pph)
+dev.off()
+```
